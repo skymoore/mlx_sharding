@@ -79,9 +79,29 @@ Server started on port 50051
 Model loaded: layers 0-30
 ```
 
-### 2. Start API Server
+### 2. Start Chat Interface
 
-In a **new terminal** on Machine 1:
+In a **new terminal** on Machine 1, you have two options:
+
+#### Option A: Gradio Chat UI (Recommended - Modern & Beautiful)
+
+```bash
+cd ~/Develop/skymoore/mlx_sharding
+poetry run python -m shard.gradio_chat \
+  --model /Users/sky/.lmstudio/models/lmstudio-community/GLM-4.5-Air-MLX-4bit \
+  -s localhost:50051,192.168.1.100:50051
+```
+
+**Expected output:**
+
+```
+✓ Connected to 2 shard(s)
+Running on local URL:  http://127.0.0.1:7860
+```
+
+Open http://127.0.0.1:7860 in your browser for a beautiful chat interface!
+
+#### Option B: OpenAI-Compatible API Server
 
 ```bash
 cd ~/Develop/skymoore/mlx_sharding
@@ -90,16 +110,16 @@ poetry run python -m shard.openai_api \
   -s localhost:50051,192.168.1.100:50051
 ```
 
-Replace `192.168.1.100` with Machine 2's actual IP address.
-
-**Note**: Use `-s` or `--llm-shard-addresses` for the shard server addresses.
-
 **Expected output:**
 
 ```
 API server running on http://localhost:8080
 Connected to shards: localhost:50051, 192.168.1.100:50051
 ```
+
+Replace `192.168.1.100` with Machine 2's actual IP address.
+
+**Note**: Use `-s` or `--llm-shard-addresses` for the shard server addresses.
 
 ---
 
