@@ -66,7 +66,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             )
 
 
-def serve(model_path, start_layer=None, end_layer=None):
+def serve(model_path, start_layer=None, end_layer=None, port=50051):
     global MODEL
     MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
     reset_cache()
@@ -80,7 +80,7 @@ def serve(model_path, start_layer=None, end_layer=None):
     mlx_tensor_pb2_grpc.add_MLXTensorServiceServicer_to_server(
         MLXTensorServicer(), server)
 
-    port = server.add_insecure_port('[::]:0')
+    server.add_insecure_port(f'[::]:{port}')
     server.start()
     print(f"Server started, listening on 0.0.0.0:{port}")
     if start_layer is not None or end_layer is not None:
