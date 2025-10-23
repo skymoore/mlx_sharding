@@ -137,21 +137,23 @@ class ChatBot:
             for _ in range(max_tokens):
                 # Send through all shards sequentially
                 output = current_tokens
-                for stub in self.stubs:
+                for i, stub in enumerate(self.stubs):
                     # Convert to bytes for gRPC
                     from .utils import tensor_to_bytes, response_to_mlx_array
                     from .grpc import mlx_tensor_pb2
                     
+                    print(f"Sending to shard {i+1}: shape={output.shape}, dtype={output.dtype}")
                     tensor_msg = mlx_tensor_pb2.Tensor(
                         tensor_data=tensor_to_bytes(output),
                         shape=list(output.shape),
                         dtype=str(output.dtype)
                     )
                     response_msg = stub.SendTensor(tensor_msg)
-                    output = response_to_mlx_array(response_msg.tensor)
+                    output = response_to_mlx_array(response_msg)
                     
                     if output is None:
-                        raise ValueError("Shard returned None")
+                        raise ValueError(f"Shard {i+1} returned None")
+                    print(f"Received from shard {i+1}: shape={output.shape}, dtype={output.dtype}")
                 
                 # Output from last shard should be logits
                 logits = output[:, -1, :]

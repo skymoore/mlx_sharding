@@ -82,11 +82,16 @@ def send_tensor(stub, tensor: mx.array):
 
 
 def response_to_mlx_array(response):
+    """Convert a TensorResponse protobuf message to an MLX array."""
     try:
-        tensor = bytes_to_tensor(response.tensor_data, response.dtype)
-        tensor = tensor.reshape(response.shape)
+        if not response.success or response.tensor is None:
+            print(f"Error from shard: {response.message}")
+            return None
+        tensor = bytes_to_tensor(response.tensor.tensor_data, response.tensor.dtype)
+        tensor = tensor.reshape(response.tensor.shape)
         return tensor
     except Exception as e:
+        print(f"Error converting response to MLX array: {e}")
         return None
 
 
@@ -106,6 +111,7 @@ def bytes_to_tensor(byte_data, dtype_str):
         "mlx.core.int32": np.int32,
         "mlx.core.int64": np.int64,
         "mlx.core.float16": np.float16,
+        "mlx.core.bfloat16": np.uint16,  # bfloat16 stored as uint16 in numpy
     }
     if dtype_str not in dtype_map:
         raise ValueError(f"Unsupported dtype: {dtype_str}")
