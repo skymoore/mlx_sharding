@@ -4,7 +4,7 @@ from concurrent import futures
 from ..grpc import mlx_tensor_pb2, mlx_tensor_pb2_grpc
 from ..utils import bytes_to_tensor, load_model, tensor_to_bytes
 import mlx.core as mx
-from mlx_lm.models.base import KVCache
+from mlx_lm.models.cache import KVCache
 
 MODEL = None
 CACHE = None
@@ -14,12 +14,7 @@ def reset_cache():
     if hasattr(MODEL, "make_cache"):
         CACHE = MODEL.make_cache()
     else:
-        kv_heads = (
-            [MODEL.n_kv_heads] * len(MODEL.layers)
-            if isinstance(MODEL.n_kv_heads, int)
-            else MODEL.n_kv_heads
-        )
-        CACHE = [KVCache(MODEL.head_dim, n) for n in kv_heads]
+        raise ValueError("Model does not have make_cache() method. Please use a compatible model.")
     print("Cache has been reset")
 
 
