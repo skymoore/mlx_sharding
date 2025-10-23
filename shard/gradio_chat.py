@@ -96,37 +96,33 @@ class ChatBot:
     def chat(
         self,
         message: str,
-        history: List[List[str]],
+        history: List[dict],
         temperature: float = 0.7,
         max_tokens: int = 512,
         top_p: float = 0.9,
-    ) -> Generator[str, None, None]:
+    ) -> Generator[dict, None, None]:
         """
         Generate a response to the user message.
         
         Args:
             message: User's input message
-            history: Chat history as list of [user_msg, bot_msg] pairs
+            history: Chat history as list of message dicts with 'role' and 'content'
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             top_p: Top-p sampling parameter
         
         Yields:
-            Partial responses as they're generated
+            Partial responses as message dicts
         """
         if not message.strip():
-            yield ""
+            yield {"role": "assistant", "content": ""}
             return
         
         # Reset cache for new conversation turn
         self.reset_cache()
         
-        # Build conversation history
-        conversation = []
-        for user_msg, bot_msg in history:
-            conversation.append({"role": "user", "content": user_msg})
-            if bot_msg:
-                conversation.append({"role": "assistant", "content": bot_msg})
+        # Build conversation from history
+        conversation = history.copy()
         conversation.append({"role": "user", "content": message})
         
         # Format with chat template
@@ -159,7 +155,7 @@ class ChatBot:
                 # Decode token
                 decoded = self.tokenizer.decode([token])
                 response += decoded
-                yield response
+                yield {"role": "assistant", "content": response}
                 
                 # Check for EOS
                 eos_ids = (
@@ -170,7 +166,7 @@ class ChatBot:
                 if token in eos_ids:
                     break
         except Exception as e:
-            yield f"Error generating response: {e}"
+            yield {"role": "assistant", "content": f"Error generating response: {e}"}
 
 
 def create_interface(chatbot: ChatBot, share: bool = False):
@@ -194,6 +190,7 @@ def create_interface(chatbot: ChatBot, share: bool = False):
                     label="Chat",
                     height=600,
                     show_copy_button=True,
+                    type="messages",
                 )
                 
                 with gr.Row():
@@ -256,23 +253,28 @@ def create_interface(chatbot: ChatBot, share: bool = False):
         
         # Event handlers
         def user_message(message, history):
-            return "", history + [[message, None]]
+            return "", history + [{"role": "user", "content": message}]
         
         def bot_response(history, temperature, max_tokens, top_p):
-            message = history[-1][0]
+            if not history or history[-1]["role"] != "user":
+                return history
+            
+            message = history[-1]["content"]
             history_without_last = history[:-1]
             
-            partial_response = ""
-            for partial in chatbot.chat(
+            for partial_msg in chatbot.chat(
                 message,
                 history_without_last,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 top_p=top_p,
             ):
-                partial_response = partial
-                history[-1][1] = partial_response
-                yield history
+                # Update or append assistant message
+                if history[-1]["role"] == "user":
+                    yield history + [partial_msg]
+                else:
+                    history[-1] = partial_msg
+                    yield history
         
         def clear_chat():
             chatbot.reset_cache()
@@ -281,8 +283,9 @@ def create_interface(chatbot: ChatBot, share: bool = False):
         def retry_last(history):
             if not history:
                 return history
-            # Remove last bot response and regenerate
-            history[-1][1] = None
+            # Remove last assistant message if present
+            if history[-1]["role"] == "assistant":
+                history = history[:-1]
             return history
         
         # Wire up events
