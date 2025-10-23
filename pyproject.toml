@@ -14,6 +14,7 @@ dependencies = [
     "grpcio-tools>=1.76.0,<2.0.0",
     "transformers>=4.40.0",
     "protobuf>=6.31.1",
+    "gradio>=5.0.0",
 ]
 
 [project.urls]
@@ -22,6 +23,7 @@ Homepage = "https://github.com/mzbac/mlx_sharding"
 [project.scripts]
 mlx-sharding-server = "shard.main:main"
 mlx-sharding-api = "shard.openai_api:main"
+mlx-sharding-chat = "shard.gradio_chat:main"
 
 [tool.poetry]
 name = "mlx-sharding"
@@ -42,10 +44,12 @@ grpcio = "^1.76.0"
 grpcio-tools = "^1.76.0"
 transformers = "^4.40.0"
 protobuf = "^6.31.1"
+gradio = "^5.0.0"
 
 [tool.poetry.scripts]
 mlx-sharding-server = "shard.main:main"
 mlx-sharding-api = "shard.openai_api:main"
+mlx-sharding-chat = "shard.gradio_chat:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
