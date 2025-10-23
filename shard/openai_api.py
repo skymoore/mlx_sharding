@@ -18,7 +18,7 @@ from transformers import PreTrainedTokenizer
 import grpc
 from .grpc import mlx_tensor_pb2_grpc
 from mlx_lm.tokenizer_utils import TokenizerWrapper, load_tokenizer
-from mlx_lm.utils import get_model_path
+from mlx_lm.utils import hf_repo_to_path
 from .utils import create_generate_step_with_grpc, load_model
 
 
@@ -106,14 +106,16 @@ class ModelProvider:
         if model_path == "default_model" and self.cli_args.model is not None:
             model = load_model(
                 self.cli_args.model, start_layer=self.cli_args.start_layer, end_layer=self.cli_args.end_layer)
-            tokenizer = load_tokenizer(get_model_path(
-                self.cli_args.model), tokenizer_config)
+            # Handle local path or HF repo for tokenizer
+            tokenizer_path = Path(self.cli_args.model) if Path(self.cli_args.model).exists() else hf_repo_to_path(self.cli_args.model)
+            tokenizer = load_tokenizer(tokenizer_path, tokenizer_config)
         else:
             self._validate_model_path(model_path)
             model = load_model(
                 model_path, start_layer=self.cli_args.start_layer, end_layer=self.cli_args.end_layer)
-            tokenizer = load_tokenizer(
-                get_model_path(model_path), tokenizer_config)
+            # Handle local path or HF repo for tokenizer
+            tokenizer_path = Path(model_path) if Path(model_path).exists() else hf_repo_to_path(model_path)
+            tokenizer = load_tokenizer(tokenizer_path, tokenizer_config)
 
         if self.cli_args.use_default_chat_template:
             if tokenizer.chat_template is None:
