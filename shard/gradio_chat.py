@@ -143,7 +143,7 @@ class ChatBot:
         # Generate response
         response = ""
         try:
-            for token, _ in zip(
+            for (token, logprobs), _ in zip(
                 self.generate_step(
                     prompt_tokens,
                     self.model,
@@ -166,7 +166,10 @@ class ChatBot:
                 if token in eos_ids:
                     break
         except Exception as e:
-            yield {"role": "assistant", "content": f"Error generating response: {e}"}
+            import traceback
+            error_msg = f"Error generating response: {e}\n{traceback.format_exc()}"
+            print(error_msg)
+            yield {"role": "assistant", "content": f"Error: {e}"}
 
 
 def create_interface(chatbot: ChatBot, share: bool = False):
