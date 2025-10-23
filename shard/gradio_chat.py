@@ -24,8 +24,20 @@ def parse_args():
     parser.add_argument(
         "-s", "--llm-shard-addresses",
         type=str,
-        default="localhost:50051",
-        help="Comma-separated list of gRPC server addresses (default: localhost:50051)"
+        default="",
+        help="Comma-separated list of REMOTE gRPC server addresses (e.g., '192.168.1.100:50051'). Do NOT include localhost shard."
+    )
+    parser.add_argument(
+        "--start-layer",
+        type=int,
+        default=0,
+        help="Start layer for local model (default: 0)"
+    )
+    parser.add_argument(
+        "--end-layer",
+        type=int,
+        default=30,
+        help="End layer for local model (default: 30)"
     )
     parser.add_argument(
         "--host",
@@ -48,7 +60,7 @@ def parse_args():
 
 
 class ChatBot:
-    def __init__(self, model_path: str, shard_addresses: List[str]):
+    def __init__(self, model_path: str, shard_addresses: List[str], local_layers: tuple = None):
         self.model_path = model_path
         self.shard_addresses = shard_addresses
         
@@ -56,7 +68,17 @@ class ChatBot:
         tokenizer_path = Path(model_path) if Path(model_path).exists() else model_path
         self.tokenizer = load_tokenizer(tokenizer_path)
         
-        # Connect to gRPC shards
+        # Load LOCAL model for first layers
+        # This is the key: Gradio runs on same machine as first shard
+        if local_layers is None:
+            local_layers = (0, 30)  # Default: layers 0-30
+        
+        print(f"Loading local model (layers {local_layers[0]}-{local_layers[1]})...")
+        self.model = load_model(model_path, start_layer=local_layers[0], end_layer=local_layers[1])
+        self.cache = self.model.make_cache()
+        print(f"✓ Local model loaded: layers {local_layers[0]}-{local_layers[1]}")
+        
+        # Connect to REMOTE gRPC shards only (not the local one)
         channel_options = [
             ('grpc.max_metadata_size', 32 * 1024 * 1024),
             ('grpc.max_send_message_length', 128 * 1024 * 1024),
@@ -69,18 +91,24 @@ class ChatBot:
             stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
             self.stubs.append(stub)
         
-        # Don't load model locally - all processing happens on shards
-        self.model = None
-        print(f"✓ Connected to {len(self.stubs)} shard(s)")
-        print("  All model processing will happen on remote shards")
+        print(f"✓ Connected to {len(self.stubs)} remote shard(s)")
+        for i, addr in enumerate(shard_addresses, 1):
+            print(f"  Remote shard {i}: {addr}")
     
     def reset_cache(self):
-        """Reset cache on all shards"""
-        for stub in self.stubs:
+        """Reset cache on local model and all remote shards"""
+        # Reset local cache
+        if hasattr(self.model, "make_cache"):
+            self.cache = self.model.make_cache()
+            print("✓ Local cache reset")
+        
+        # Reset remote shard caches
+        for i, stub in enumerate(self.stubs, 1):
             try:
                 stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest())
+                print(f"✓ Remote shard {i} cache reset")
             except Exception as e:
-                print(f"Warning: Failed to reset cache on shard: {e}")
+                print(f"Warning: Failed to reset cache on remote shard {i}: {e}")
     
     def chat(
         self,
@@ -129,53 +157,49 @@ class ChatBot:
         tokens = self.tokenizer.encode(prompt)
         prompt_tokens = mx.array([tokens])
         
-        # Generate response by sending tokens through all shards
+        # Generate response following original design:
+        # 1. Process tokens through LOCAL model with cache
+        # 2. Send hidden states to REMOTE shards via gRPC
+        # 3. Get logits back and sample next token
         response = ""
         try:
-            # Keep track of all tokens (prompt + generated)
-            all_tokens = tokens.copy()
+            from .utils import tensor_to_bytes, response_to_mlx_array
+            from .grpc import mlx_tensor_pb2
             
-            for _ in range(max_tokens):
-                # Send all tokens through first shard, then just last token through remaining shards
-                for i, stub in enumerate(self.stubs):
-                    from .utils import tensor_to_bytes, response_to_mlx_array
-                    from .grpc import mlx_tensor_pb2
+            # Start with prompt tokens
+            y = mx.array([tokens])
+            
+            for step in range(max_tokens):
+                # Step 1: Process through LOCAL model (layers 0-30)
+                print(f"\n=== Generation step {step} ===")
+                print(f"Local input: shape={y.shape}, dtype={y.dtype}")
+                
+                hidden_states = self.model(y, cache=self.cache)
+                print(f"Local output (hidden states): shape={hidden_states.shape}, dtype={hidden_states.dtype}")
+                
+                # Step 2: Send hidden states through REMOTE shards
+                output = hidden_states
+                for i, stub in enumerate(self.stubs, 1):
+                    print(f"Sending to remote shard {i}: shape={output.shape}, dtype={output.dtype}")
                     
-                    if i == 0:
-                        # First shard: send all tokens
-                        input_tokens = mx.array([all_tokens])
-                        print(f"Sending to shard 1: shape={input_tokens.shape}, dtype={input_tokens.dtype}")
-                        tensor_msg = mlx_tensor_pb2.Tensor(
-                            tensor_data=tensor_to_bytes(input_tokens),
-                            shape=list(input_tokens.shape),
-                            dtype=str(input_tokens.dtype)
-                        )
-                        response_msg = stub.SendTensor(tensor_msg)
-                        output = response_to_mlx_array(response_msg)
-                        
-                        if output is None:
-                            raise ValueError(f"Shard 1 returned None")
-                        print(f"Received from shard 1: shape={output.shape}, dtype={output.dtype}")
-                    else:
-                        # Subsequent shards: send only last token's hidden states
-                        last_hidden = output[:, -1:, :]
-                        print(f"Sending to shard {i+1}: shape={last_hidden.shape}, dtype={last_hidden.dtype}")
-                        tensor_msg = mlx_tensor_pb2.Tensor(
-                            tensor_data=tensor_to_bytes(last_hidden),
-                            shape=list(last_hidden.shape),
-                            dtype=str(last_hidden.dtype)
-                        )
-                        response_msg = stub.SendTensor(tensor_msg)
-                        output = response_to_mlx_array(response_msg)
-                        
-                        if output is None:
-                            raise ValueError(f"Shard {i+1} returned None")
-                        print(f"Received from shard {i+1}: shape={output.shape}, dtype={output.dtype}")
+                    tensor_msg = mlx_tensor_pb2.Tensor(
+                        tensor_data=tensor_to_bytes(output),
+                        shape=list(output.shape),
+                        dtype=str(output.dtype)
+                    )
+                    response_msg = stub.SendTensor(tensor_msg)
+                    output = response_to_mlx_array(response_msg)
+                    
+                    if output is None:
+                        raise ValueError(f"Remote shard {i} returned None")
+                    
+                    print(f"Received from remote shard {i}: shape={output.shape}, dtype={output.dtype}")
                 
-                # Output from last shard should be logits
+                # Step 3: Get logits from final output
                 logits = output[:, -1, :]
+                print(f"Logits shape: {logits.shape}")
                 
-                # Sample next token
+                # Step 4: Sample next token
                 if temperature == 0:
                     next_token = mx.argmax(logits, axis=-1)
                 else:
@@ -188,6 +212,7 @@ class ChatBot:
                         next_token = mx.random.categorical(logits * (1 / temperature))
                 
                 token_id = next_token.item()
+                print(f"Sampled token: {token_id}")
                 
                 # Decode and yield
                 decoded = self.tokenizer.decode([token_id])
@@ -201,10 +226,12 @@ class ChatBot:
                     else [self.tokenizer.eos_token_id]
                 )
                 if token_id in eos_ids:
+                    print("EOS token reached")
                     break
                 
-                # Add new token to the list
-                all_tokens.append(token_id)
+                # Step 5: Prepare next input (just the new token)
+                # Local cache will handle efficiency
+                y = mx.array([[token_id]])
                 
         except Exception as e:
             import traceback
@@ -374,21 +401,28 @@ def create_interface(chatbot: ChatBot, share: bool = False):
 def main():
     args = parse_args()
     
-    # Parse shard addresses
-    shard_addresses = [addr.strip() for addr in args.llm_shard_addresses.split(',')]
+    # Parse remote shard addresses
+    shard_addresses = []
+    if args.llm_shard_addresses:
+        shard_addresses = [addr.strip() for addr in args.llm_shard_addresses.split(',') if addr.strip()]
     
     print("=" * 70)
     print("MLX Sharding - Gradio Chat Interface")
     print("=" * 70)
     print(f"Model: {args.model}")
-    print(f"Shards: {', '.join(shard_addresses)}")
+    print(f"Local layers: {args.start_layer}-{args.end_layer}")
+    if shard_addresses:
+        print(f"Remote shards: {', '.join(shard_addresses)}")
+    else:
+        print("Remote shards: None (local-only mode)")
     print(f"Server: http://{args.host}:{args.port}")
     if args.share:
         print("Share: Enabled (public link will be generated)")
     print("=" * 70)
     
     # Initialize chatbot
-    chatbot = ChatBot(args.model, shard_addresses)
+    local_layers = (args.start_layer, args.end_layer)
+    chatbot = ChatBot(args.model, shard_addresses, local_layers=local_layers)
     
     # Create and launch interface
     demo = create_interface(chatbot, share=args.share)
