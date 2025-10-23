@@ -13,7 +13,7 @@ dependencies = [
     "grpcio>=1.76.0,<2.0.0",
     "grpcio-tools>=1.76.0,<2.0.0",
     "transformers>=4.40.0",
-    "protobuf>=5.31.1",
+    "protobuf>=6.31.1",
 ]
 
 [project.urls]
@@ -41,7 +41,7 @@ numpy = "^1.24.0"
 grpcio = "^1.76.0"
 grpcio-tools = "^1.76.0"
 transformers = "^4.40.0"
-protobuf = "^5.31.1"
+protobuf = "^6.31.1"
 
 [tool.poetry.scripts]
 mlx-sharding-server = "shard.main:main"
