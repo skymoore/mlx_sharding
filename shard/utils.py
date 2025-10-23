@@ -165,7 +165,14 @@ def create_generate_step_with_grpc(grpc_stubs: List):
 
         def _step(y):
             nonlocal repetition_context
-            output = model(y[None], cache=cache)
+            # Ensure y has shape (batch, seq_len)
+            if y.ndim == 0:  # scalar
+                y = y.reshape(1, 1)
+            elif y.ndim == 1:  # (seq_len,)
+                y = y.reshape(1, -1)
+            # else y is already (batch, seq_len)
+            
+            output = model(y, cache=cache)
             if output.dtype == mx.bfloat16:
                 output = output.astype(mx.float16)
 
