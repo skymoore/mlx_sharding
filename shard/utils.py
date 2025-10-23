@@ -2,6 +2,7 @@ from importlib import import_module
 import glob
 import json
 import struct
+import logging
 import mlx.core as mx
 import mlx.nn as nn
 from typing import Dict, Generator, Optional, Tuple, List
@@ -10,6 +11,9 @@ from mlx_lm.sample_utils import apply_top_p, make_logits_processors
 from mlx_lm.utils import hf_repo_to_path
 import numpy as np
 from .grpc import mlx_tensor_pb2
+
+# Setup logger for this module
+logger = logging.getLogger(__name__)
 
 MODEL_REMAPPING = {
     "mistral": "llama",  # mistral is compatible with llama
@@ -24,7 +28,7 @@ def _get_classes(config: dict):
         arch = import_module(f".model.{model_type}", package="shard.server")
     except ImportError:
         msg = f"Model type {model_type} not supported."
-        print(msg)
+        logger.error(msg)
         raise ValueError(msg)
 
     return arch.Model, arch.ModelArgs
@@ -84,14 +88,27 @@ def send_tensor(stub, tensor: mx.array):
 def response_to_mlx_array(response):
     """Convert a TensorResponse protobuf message to an MLX array."""
     try:
-        if not response.success or response.tensor is None:
-            print(f"Error from shard: {response.message}")
+        # Check if response is valid
+        if not hasattr(response, 'success'):
+            logger.error(f"Invalid response object: {type(response)}")
             return None
+            
+        if not response.success:
+            logger.error(f"Error from shard: {response.message}")
+            return None
+            
+        if response.tensor is None:
+            logger.error(f"No tensor in response: {response.message}")
+            return None
+        
+        # Debug: log tensor info at DEBUG level
+        logger.debug(f"Converting tensor: dtype={response.tensor.dtype}, shape={response.tensor.shape}, data_len={len(response.tensor.tensor_data)}")
+        
         tensor = bytes_to_tensor(response.tensor.tensor_data, response.tensor.dtype)
         tensor = tensor.reshape(response.tensor.shape)
         return tensor
     except Exception as e:
-        print(f"Error converting response to MLX array: {e}")
+        logger.error(f"Error converting response to MLX array: {e}", exc_info=True)
         return None
 
 
@@ -136,7 +153,7 @@ def create_generate_step_with_grpc(grpc_stubs: List):
 
         for stub in grpc_stubs:
             reset_response = stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest())
-            print("ResetCache Response:", reset_response.message)
+            logger.debug(f"ResetCache Response: {reset_response.message}")
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
             # logit_bias is now handled by logits_processors
@@ -184,7 +201,9 @@ def create_generate_step_with_grpc(grpc_stubs: List):
 
             for stub in grpc_stubs:
                 response = send_tensor(stub, output)
-                output = response_to_mlx_array(response.tensor)
+                output = response_to_mlx_array(response)
+                if output is None:
+                    raise ValueError("Shard returned None")
 
             logits = output[:, -1, :]
             

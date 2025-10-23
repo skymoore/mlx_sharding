@@ -2,6 +2,7 @@
 Gradio-based chat interface for MLX sharding.
 """
 import argparse
+import logging
 import grpc
 from pathlib import Path
 from typing import List, Generator
@@ -11,6 +12,9 @@ import gradio as gr
 from .grpc import mlx_tensor_pb2_grpc, mlx_tensor_pb2
 from .utils import load_model, create_generate_step_with_grpc
 from mlx_lm.tokenizer_utils import load_tokenizer
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -171,29 +175,32 @@ class ChatBot:
             
             for step in range(max_tokens):
                 # Step 1: Process through LOCAL model (layers 0-30)
-                print(f"\n=== Generation step {step} ===")
-                print(f"Local input: shape={y.shape}, dtype={y.dtype}")
+                logger.debug(f"=== Generation step {step} ===")
+                logger.debug(f"Local input: shape={y.shape}, dtype={y.dtype}")
                 
                 hidden_states = self.model(y, cache=self.cache)
-                print(f"Local output (hidden states): shape={hidden_states.shape}, dtype={hidden_states.dtype}")
+                logger.debug(f"Local output (hidden states): shape={hidden_states.shape}, dtype={hidden_states.dtype}")
                 
                 # Convert bfloat16 to float16 for gRPC transmission (matches generate.py)
                 if hidden_states.dtype == mx.bfloat16:
                     hidden_states = hidden_states.astype(mx.float16)
-                    print(f"Converted to float16 for transmission")
+                    logger.debug("Converted to float16 for transmission")
                 
                 # Step 2: Send hidden states through REMOTE shards
                 # IMPORTANT: On first step, send ALL hidden states to populate remote cache
                 # On subsequent steps, send only LAST token's hidden states
                 if step == 0:
                     output = hidden_states  # Send all tokens on first step
-                    print(f"First step: sending all hidden states: shape={output.shape}")
+                    logger.debug(f"First step: sending all hidden states: shape={output.shape}")
                 else:
                     output = hidden_states[:, -1:, :]  # Send only last token
-                    print(f"Subsequent step: sending last token hidden states: shape={output.shape}")
+                    logger.debug(f"Subsequent step: sending last token hidden states: shape={output.shape}")
                 
                 for i, stub in enumerate(self.stubs, 1):
-                    print(f"Sending to remote shard {i}: shape={output.shape}, dtype={output.dtype}")
+                    from .utils import tensor_to_bytes, response_to_mlx_array
+                    from .grpc import mlx_tensor_pb2
+                    
+                    logger.debug(f"Sending to remote shard {i}: shape={output.shape}, dtype={output.dtype}")
                     
                     tensor_msg = mlx_tensor_pb2.Tensor(
                         tensor_data=tensor_to_bytes(output),
@@ -206,12 +213,12 @@ class ChatBot:
                     if output is None:
                         raise ValueError(f"Remote shard {i} returned None")
                     
-                    print(f"Received from remote shard {i}: shape={output.shape}, dtype={output.dtype}")
+                    logger.debug(f"Received from remote shard {i}: shape={output.shape}, dtype={output.dtype}")
                 
                 # Step 3: Get logits from final output
                 logits = output[:, -1, :]
-                print(f"Logits shape: {logits.shape}")
-                print(f"Logits stats: min={float(logits.min()):.4f}, max={float(logits.max()):.4f}, mean={float(logits.mean()):.4f}, std={float(logits.std()):.4f}")
+                logger.debug(f"Logits shape: {logits.shape}")
+                logger.debug(f"Logits stats: min={float(logits.min()):.4f}, max={float(logits.max()):.4f}, mean={float(logits.mean()):.4f}, std={float(logits.std()):.4f}")
                 
                 # Step 4: Sample next token
                 if temperature == 0:
@@ -226,7 +233,7 @@ class ChatBot:
                         next_token = mx.random.categorical(logits * (1 / temperature))
                 
                 token_id = next_token.item()
-                print(f"Sampled token: {token_id}")
+                logger.debug(f"Sampled token: {token_id}")
                 
                 # Decode and yield
                 decoded = self.tokenizer.decode([token_id])
@@ -240,7 +247,7 @@ class ChatBot:
                     else [self.tokenizer.eos_token_id]
                 )
                 if token_id in eos_ids:
-                    print("EOS token reached")
+                    logger.debug("EOS token reached")
                     break
                 
                 # Step 5: Prepare next input (just the new token)
@@ -248,9 +255,8 @@ class ChatBot:
                 y = mx.array([[token_id]])
                 
         except Exception as e:
-            import traceback
-            error_msg = f"Error generating response: {e}\n{traceback.format_exc()}"
-            print(error_msg)
+            error_msg = f"Error generating response: {e}"
+            logger.error(error_msg, exc_info=True)
             yield {"role": "assistant", "content": f"Error: {e}"}
 
 

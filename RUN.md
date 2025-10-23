@@ -111,25 +111,41 @@ Running on local URL:  http://127.0.0.1:7860
 
 Open http://127.0.0.1:7860 in your browser for a beautiful chat interface!
 
-#### Option B: OpenAI-Compatible API Server
+#### Option B: OpenAI-Compatible API Server (Pure API - No Web UI)
 
 ```bash
 cd ~/Develop/skymoore/mlx_sharding
 poetry run python -m shard.openai_api \
   --model /Users/sky/.lmstudio/models/lmstudio-community/GLM-4.5-Air-MLX-4bit \
-  -s localhost:50051,192.168.1.100:50051
+  --start-layer 0 \
+  --end-layer 30 \
+  -s 192.168.1.100:50051 \
+  --host 0.0.0.0 \
+  --port 8080
 ```
+
+**Important:**
+- `--start-layer` and `--end-layer` define the LOCAL model layers
+- `-s` should ONLY include REMOTE shard addresses (NOT localhost)
+- API server loads the model locally and sends hidden states to remote shards
+- `--host 0.0.0.0` allows external connections (for Docker/TinyChat)
 
 **Expected output:**
 
 ```
-API server running on http://localhost:8080
-Connected to shards: localhost:50051, 192.168.1.100:50051
+Connected to 1 LLM shard(s)
+Loading model with layers 0 to 30
+OpenAI API endpoint: http://0.0.0.0:8080/v1
+Health check: http://0.0.0.0:8080/health
 ```
 
-Replace `192.168.1.100` with Machine 2's actual IP address.
+**API Endpoints:**
+- `POST /v1/chat/completions` - Chat completions (streaming & non-streaming)
+- `POST /v1/completions` - Text completions
+- `GET /v1/models` - List available models
+- `GET /health` - Health check
 
-**Note**: Use `-s` or `--llm-shard-addresses` for the shard server addresses.
+**Note**: The web UI has been removed. Use TinyChat (Docker) or any OpenAI-compatible client to interact with the API.
 
 ---
 

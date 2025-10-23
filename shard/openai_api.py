@@ -1,9 +1,6 @@
 import argparse
-import pkg_resources
 import json
 import logging
-import mimetypes
-import os
 import time
 import uuid
 import warnings
@@ -130,10 +127,9 @@ class ModelProvider:
 
 
 class APIHandler(BaseHTTPRequestHandler):
-    def __init__(self, model_provider: ModelProvider, static_dir: str,  *args, **kwargs):
+    def __init__(self, model_provider: ModelProvider, *args, **kwargs):
         self.created = int(time.time())
         self.model_provider = model_provider
-        self.static_dir = static_dir
         super().__init__(*args, **kwargs)
 
     def _set_cors_headers(self):
@@ -157,40 +153,72 @@ class APIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        full_path = os.path.join(self.static_dir, self.path.lstrip('/'))
-
-        if os.path.isdir(full_path):
-            full_path = os.path.join(full_path, 'index.html')
-
-        if not os.path.exists(full_path):
-            self.send_error(404, "File not found")
-            return
-
-        _, ext = os.path.splitext(full_path)
-        content_type = mimetypes.types_map.get(ext, 'application/octet-stream')
-
-        self.send_response(200)
-        self.send_header("Content-type", content_type)
-        self._set_cors_headers()
-        self.end_headers()
-
-        with open(full_path, 'rb') as file:
-            self.wfile.write(file.read())
+        # Only support API endpoints, no static file serving
+        if self.path == "/v1/models" or self.path == "/api/models":
+            self._set_completion_headers(200)
+            self.end_headers()
+            
+            # Get model name from provider
+            model_name = "default_model"
+            if hasattr(self.model_provider, 'cli_args') and self.model_provider.cli_args.model:
+                from pathlib import Path
+                model_name = Path(self.model_provider.cli_args.model).name
+            
+            # Open WebUI format
+            if self.path == "/api/models":
+                response = {
+                    "models": [
+                        {
+                            "id": model_name,
+                            "name": model_name,
+                            "object": "model",
+                            "created": self.created,
+                            "owned_by": "mlx-sharding"
+                        }
+                    ]
+                }
+            else:
+                # OpenAI format
+                response = {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": model_name,
+                            "object": "model",
+                            "created": self.created,
+                            "owned_by": "mlx-sharding"
+                        }
+                    ]
+                }
+            self.wfile.write(json.dumps(response).encode())
+        elif self.path == "/health":
+            self._set_completion_headers(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+        else:
+            self._set_completion_headers(404)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode())
 
     def do_POST(self):
         """
         Respond to a POST request from a client.
         """
+        # Parse path to remove query parameters
+        from urllib.parse import urlparse
+        parsed_path = urlparse(self.path).path
+        
         endpoints = {
             "/v1/completions": self.handle_text_completions,
             "/v1/chat/completions": self.handle_chat_completions,
             "/chat/completions": self.handle_chat_completions,
         }
 
-        if self.path not in endpoints:
+        if parsed_path not in endpoints:
+            logging.warning(f"Unknown endpoint: {parsed_path} (original: {self.path})")
             self._set_completion_headers(404)
             self.end_headers()
-            self.wfile.write(b"Not Found")
+            self.wfile.write(json.dumps({"error": f"Endpoint not found: {parsed_path}"}).encode())
             return
 
         # Fetch and parse request body
@@ -245,7 +273,7 @@ class APIHandler(BaseHTTPRequestHandler):
         )
 
         # Call endpoint specific method
-        prompt = endpoints[self.path]()
+        prompt = endpoints[parsed_path]()
 
         # Call method based on response type
         method = self.handle_stream if self.stream else self.handle_completion
@@ -546,21 +574,21 @@ def run(
     host: str,
     port: int,
     model_provider: ModelProvider,
-    static_dir: str,
     server_class=HTTPServer,
     handler_class=APIHandler,
 ):
     server_address = (host, port)
     httpd = server_class(
         server_address,
-        lambda *args, **kwargs: handler_class(model_provider, static_dir, *args, **kwargs),
+        lambda *args, **kwargs: handler_class(model_provider, *args, **kwargs),
     )
     warnings.warn(
         "mlx_lm.server is not recommended for production as "
         "it only implements basic security checks."
     )
-    logging.info(f"Starting httpd at {host} on port {port}...")
-    print(f"A web-based UI is available at http://{host}:{port}")
+    logging.info(f"Starting OpenAI-compatible API server at {host} on port {port}...")
+    print(f"OpenAI API endpoint: http://{host}:{port}/v1")
+    print(f"Health check: http://{host}:{port}/health")
     print("Press Ctrl+C to stop the server.")
     httpd.serve_forever()
 
@@ -641,12 +669,6 @@ def main():
         default=None,
         help="End layer index for model sharding (optional)",
     )
-    parser.add_argument(
-        "--static-dir",
-        type=str,
-        default=None,
-        help="Directory for static files (default: ./static)",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -678,11 +700,9 @@ def main():
     if args.start_layer is not None or args.end_layer is not None:
         logging.info(f"Loading model with layers {
                      args.start_layer or 0} to {args.end_layer or 'end'}")
-    if args.static_dir is None:
-        args.static_dir = pkg_resources.resource_filename('shard', 'static')
 
     model_provider = ModelProvider(args, grpc_stubs)
-    run(args.host, args.port, model_provider, args.static_dir)
+    run(args.host, args.port, model_provider)
 
 
 if __name__ == "__main__":
