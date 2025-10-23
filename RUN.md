@@ -89,13 +89,23 @@ In a **new terminal** on Machine 1, you have two options:
 cd ~/Develop/skymoore/mlx_sharding
 poetry run python -m shard.gradio_chat \
   --model /Users/sky/.lmstudio/models/lmstudio-community/GLM-4.5-Air-MLX-4bit \
-  -s localhost:50051,192.168.1.100:50051
+  --start-layer 0 \
+  --end-layer 30 \
+  -s 192.168.1.100:50051
 ```
+
+**Important:** 
+- `--start-layer` and `--end-layer` define the LOCAL model layers (same as the local shard server)
+- `-s` should ONLY include REMOTE shard addresses (NOT localhost)
+- Gradio loads the model locally and sends hidden states to remote shards
 
 **Expected output:**
 
 ```
-✓ Connected to 2 shard(s)
+Loading local model (layers 0-30)...
+✓ Local model loaded: layers 0-30
+✓ Connected to 1 remote shard(s)
+  Remote shard 1: 192.168.1.100:50051
 Running on local URL:  http://127.0.0.1:7860
 ```
 

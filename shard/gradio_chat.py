@@ -177,8 +177,21 @@ class ChatBot:
                 hidden_states = self.model(y, cache=self.cache)
                 print(f"Local output (hidden states): shape={hidden_states.shape}, dtype={hidden_states.dtype}")
                 
+                # Convert bfloat16 to float16 for gRPC transmission (matches generate.py)
+                if hidden_states.dtype == mx.bfloat16:
+                    hidden_states = hidden_states.astype(mx.float16)
+                    print(f"Converted to float16 for transmission")
+                
                 # Step 2: Send hidden states through REMOTE shards
-                output = hidden_states
+                # IMPORTANT: On first step, send ALL hidden states to populate remote cache
+                # On subsequent steps, send only LAST token's hidden states
+                if step == 0:
+                    output = hidden_states  # Send all tokens on first step
+                    print(f"First step: sending all hidden states: shape={output.shape}")
+                else:
+                    output = hidden_states[:, -1:, :]  # Send only last token
+                    print(f"Subsequent step: sending last token hidden states: shape={output.shape}")
+                
                 for i, stub in enumerate(self.stubs, 1):
                     print(f"Sending to remote shard {i}: shape={output.shape}, dtype={output.dtype}")
                     
@@ -198,6 +211,7 @@ class ChatBot:
                 # Step 3: Get logits from final output
                 logits = output[:, -1, :]
                 print(f"Logits shape: {logits.shape}")
+                print(f"Logits stats: min={float(logits.min()):.4f}, max={float(logits.max()):.4f}, mean={float(logits.mean()):.4f}, std={float(logits.std()):.4f}")
                 
                 # Step 4: Sample next token
                 if temperature == 0:

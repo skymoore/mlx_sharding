@@ -66,7 +66,9 @@ def generate_step(prompt, model, stubs: List[mlx_tensor_pb2_grpc.MLXTensorServic
         
         for i, stub in enumerate(stubs):
             response = send_tensor(stub, output)
-            output = response_to_mlx_array(response.tensor)
+            output = response_to_mlx_array(response)
+            if output is None:
+                raise ValueError(f"Shard {i+1} returned None")
             if i == len(stubs) - 1:  # Last stub
                 logits = output[:, -1, :]
                 y = sample(logits)
