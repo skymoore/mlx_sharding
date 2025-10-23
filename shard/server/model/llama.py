@@ -3,8 +3,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_additive_causal_mask
-from mlx_lm.models.llama import TransformerBlock, ModelArgs
+from mlx_lm.models.llama import TransformerBlock, ModelArgs, create_attention_mask
 from .base import IdentityBlock
 
 
@@ -47,10 +46,7 @@ class LlamaModel(nn.Module):
 
         mask = None
         if h.shape[1] > 1:
-            mask = create_additive_causal_mask(
-                h.shape[1], cache[0].offset if cache is not None else 0
-            )
-            mask = mask.astype(h.dtype)
+            mask = create_attention_mask(h, cache[0] if cache is not None else None)
 
         if cache is None:
             cache = [None] * len(self.layers)

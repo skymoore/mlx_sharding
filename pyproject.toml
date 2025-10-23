@@ -1,0 +1,52 @@
+[project]
+name = "mlx-sharding"
+version = "0.1.3"
+description = "A package for MLX model sharding and distributed inference"
+authors = [{ name = "Anchen", email = "li.anchen.au@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.12.0"
+dependencies = [
+    "mlx>=0.29.3",
+    "mlx-lm>=0.28.3",
+    "huggingface-hub>=0.36.0",
+    "numpy>=1.24.0",
+    "grpcio>=1.76.0,<2.0.0",
+    "grpcio-tools>=1.76.0,<2.0.0",
+    "transformers>=4.40.0",
+    "protobuf>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mzbac/mlx_sharding"
+
+[project.scripts]
+mlx-sharding-server = "shard.main:main"
+mlx-sharding-api = "shard.openai_api:main"
+
+[tool.poetry]
+name = "mlx-sharding"
+version = "0.1.3"
+description = "A package for MLX model sharding and distributed inference"
+authors = ["Anchen <li.anchen.au@gmail.com>"]
+readme = "README.md"
+packages = [{include = "shard"}]
+include = ["shard/protos/*.proto", "shard/static/*"]
+
+[tool.poetry.dependencies]
+python = ">=3.12.0,<3.13"
+mlx = "^0.29.3"
+mlx-lm = "^0.28.3"
+huggingface-hub = "^0.36.0"
+numpy = "^1.24.0"
+grpcio = "^1.76.0"
+grpcio-tools = "^1.76.0"
+transformers = "^4.40.0"
+protobuf = "^4.0.0"
+
+[tool.poetry.scripts]
+mlx-sharding-server = "shard.main:main"
+mlx-sharding-api = "shard.openai_api:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

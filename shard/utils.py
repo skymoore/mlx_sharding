@@ -5,9 +5,9 @@ import struct
 import mlx.core as mx
 import mlx.nn as nn
 from typing import Dict, Generator, Optional, Tuple, List
-from mlx_lm.models.base import KVCache
-from mlx_lm.sample_utils import top_p_sampling
-from mlx_lm.utils import apply_repetition_penalty, get_model_path
+from mlx_lm.models.cache import KVCache
+from mlx_lm.sample_utils import apply_top_p, make_logits_processors
+from mlx_lm.utils import hf_repo_to_path
 import numpy as np
 from .grpc import mlx_tensor_pb2
 
@@ -31,7 +31,12 @@ def _get_classes(config: dict):
 
 
 def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = None):
-    path = get_model_path(path_or_hf_repo)
+    from pathlib import Path
+    # Check if it's a local path or HuggingFace repo
+    if Path(path_or_hf_repo).exists():
+        path = Path(path_or_hf_repo)
+    else:
+        path = hf_repo_to_path(path_or_hf_repo)
     with open(path / "config.json", "r") as f:
         config = json.load(f)
         if start_layer is not None and end_layer is not None:
@@ -124,16 +129,15 @@ def create_generate_step_with_grpc(grpc_stubs: List):
             print("ResetCache Response:", reset_response.message)
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            if logit_bias:
-                indices = mx.array(list(logit_bias.keys()))
-                values = mx.array(list(logit_bias.values()))
-                logits[:, indices] += values
-            logprobs = logits - mx.logsumexp(logits)
+            # logit_bias is now handled by logits_processors
+            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if temp == 0:
                 token = mx.argmax(logits, axis=-1)
             else:
                 if top_p > 0 and top_p < 1.0:
-                    token = top_p_sampling(logits, top_p, temp)
+                    # apply_top_p modifies logprobs, then sample from them
+                    modified_logprobs = apply_top_p(logprobs, top_p)
+                    token = mx.random.categorical(modified_logprobs * (1 / temp))
                 else:
                     token = mx.random.categorical(logits * (1 / temp))
             return token, logprobs
@@ -142,16 +146,18 @@ def create_generate_step_with_grpc(grpc_stubs: List):
         if hasattr(model, "make_cache"):
             cache = model.make_cache()
         else:
-            kv_heads = (
-                [model.n_kv_heads] * len(model.layers)
-                if isinstance(model.n_kv_heads, int)
-                else model.n_kv_heads
-            )
-            cache = [KVCache(model.head_dim, n) for n in kv_heads]
+            raise ValueError("Model does not have make_cache() method. Please use a compatible model.")
 
         repetition_context = prompt.tolist()
         if repetition_context_size:
             repetition_context = repetition_context[-repetition_context_size:]
+        
+        # Create logits processors (including repetition penalty if specified)
+        logits_processors = make_logits_processors(
+            logit_bias=logit_bias,
+            repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size
+        )
 
         def _step(y):
             nonlocal repetition_context
@@ -164,14 +170,14 @@ def create_generate_step_with_grpc(grpc_stubs: List):
                 output = response_to_mlx_array(response.tensor)
 
             logits = output[:, -1, :]
+            
+            # Apply logits processors (repetition penalty, logit bias, etc.)
+            for processor in logits_processors:
+                logits = processor(mx.array(repetition_context), logits)
+            
+            y, logprobs = sample(logits)
             if repetition_penalty:
-                logits = apply_repetition_penalty(
-                    logits, repetition_context, repetition_penalty
-                )
-                y, logprobs = sample(logits)
                 repetition_context.append(y.item())
-            else:
-                y, logprobs = sample(logits)
             if repetition_context_size:
                 if len(repetition_context) > repetition_context_size:
                     repetition_context = repetition_context[-repetition_context_size:]
