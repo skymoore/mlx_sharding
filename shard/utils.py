@@ -92,6 +92,10 @@ def response_to_mlx_array(response):
 
 def tensor_to_bytes(tensor):
     """Convert an MLX tensor to bytes."""
+    if tensor is None:
+        raise ValueError("Cannot convert None to bytes")
+    # Ensure tensor is evaluated before converting to bytes
+    mx.eval(tensor)
     return bytes(memoryview(tensor))
 
 
