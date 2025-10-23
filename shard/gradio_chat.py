@@ -69,21 +69,10 @@ class ChatBot:
             stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
             self.stubs.append(stub)
         
-        # Load model for first shard (if running locally)
-        # This is optional - if all shards are remote, we don't need the model
+        # Don't load model locally - all processing happens on shards
         self.model = None
-        try:
-            self.model = load_model(model_path, start_layer=0, end_layer=30)
-            print(f"✓ Local model loaded (layers 0-30)")
-        except Exception as e:
-            print(f"⚠ No local model loaded: {e}")
-            print("  Assuming all processing happens on remote shards")
-        
-        # Create generate function
-        if self.model:
-            self.generate_step = create_generate_step_with_grpc(self.stubs)
-        
         print(f"✓ Connected to {len(self.stubs)} shard(s)")
+        print("  All model processing will happen on remote shards")
     
     def reset_cache(self):
         """Reset cache on all shards"""
@@ -140,20 +129,49 @@ class ChatBot:
         tokens = self.tokenizer.encode(prompt)
         prompt_tokens = mx.array([tokens])
         
-        # Generate response
+        # Generate response by sending tokens through all shards
         response = ""
         try:
-            for (token, logprobs), _ in zip(
-                self.generate_step(
-                    prompt_tokens,
-                    self.model,
-                    temp=temperature,
-                    top_p=top_p,
-                ),
-                range(max_tokens)
-            ):
-                # Decode token
-                decoded = self.tokenizer.decode([token])
+            current_tokens = prompt_tokens
+            
+            for _ in range(max_tokens):
+                # Send through all shards sequentially
+                output = current_tokens
+                for stub in self.stubs:
+                    # Convert to bytes for gRPC
+                    from .utils import tensor_to_bytes, response_to_mlx_array
+                    from .grpc import mlx_tensor_pb2
+                    
+                    tensor_msg = mlx_tensor_pb2.Tensor(
+                        tensor_data=tensor_to_bytes(output),
+                        shape=list(output.shape),
+                        dtype=str(output.dtype)
+                    )
+                    response_msg = stub.SendTensor(tensor_msg)
+                    output = response_to_mlx_array(response_msg.tensor)
+                    
+                    if output is None:
+                        raise ValueError("Shard returned None")
+                
+                # Output from last shard should be logits
+                logits = output[:, -1, :]
+                
+                # Sample next token
+                if temperature == 0:
+                    next_token = mx.argmax(logits, axis=-1)
+                else:
+                    if top_p > 0 and top_p < 1.0:
+                        logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+                        from mlx_lm.sample_utils import apply_top_p
+                        modified_logprobs = apply_top_p(logprobs, top_p)
+                        next_token = mx.random.categorical(modified_logprobs * (1 / temperature))
+                    else:
+                        next_token = mx.random.categorical(logits * (1 / temperature))
+                
+                token_id = next_token.item()
+                
+                # Decode and yield
+                decoded = self.tokenizer.decode([token_id])
                 response += decoded
                 yield {"role": "assistant", "content": response}
                 
@@ -163,8 +181,12 @@ class ChatBot:
                     if isinstance(self.tokenizer.eos_token_id, list)
                     else [self.tokenizer.eos_token_id]
                 )
-                if token in eos_ids:
+                if token_id in eos_ids:
                     break
+                
+                # Prepare next input (just the new token)
+                current_tokens = mx.array([[token_id]])
+                
         except Exception as e:
             import traceback
             error_msg = f"Error generating response: {e}\n{traceback.format_exc()}"
