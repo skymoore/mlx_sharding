@@ -132,28 +132,45 @@ class ChatBot:
         # Generate response by sending tokens through all shards
         response = ""
         try:
-            current_tokens = prompt_tokens
+            # Keep track of all tokens (prompt + generated)
+            all_tokens = tokens.copy()
             
             for _ in range(max_tokens):
-                # Send through all shards sequentially
-                output = current_tokens
+                # Send all tokens through first shard, then just last token through remaining shards
                 for i, stub in enumerate(self.stubs):
-                    # Convert to bytes for gRPC
                     from .utils import tensor_to_bytes, response_to_mlx_array
                     from .grpc import mlx_tensor_pb2
                     
-                    print(f"Sending to shard {i+1}: shape={output.shape}, dtype={output.dtype}")
-                    tensor_msg = mlx_tensor_pb2.Tensor(
-                        tensor_data=tensor_to_bytes(output),
-                        shape=list(output.shape),
-                        dtype=str(output.dtype)
-                    )
-                    response_msg = stub.SendTensor(tensor_msg)
-                    output = response_to_mlx_array(response_msg)
-                    
-                    if output is None:
-                        raise ValueError(f"Shard {i+1} returned None")
-                    print(f"Received from shard {i+1}: shape={output.shape}, dtype={output.dtype}")
+                    if i == 0:
+                        # First shard: send all tokens
+                        input_tokens = mx.array([all_tokens])
+                        print(f"Sending to shard 1: shape={input_tokens.shape}, dtype={input_tokens.dtype}")
+                        tensor_msg = mlx_tensor_pb2.Tensor(
+                            tensor_data=tensor_to_bytes(input_tokens),
+                            shape=list(input_tokens.shape),
+                            dtype=str(input_tokens.dtype)
+                        )
+                        response_msg = stub.SendTensor(tensor_msg)
+                        output = response_to_mlx_array(response_msg)
+                        
+                        if output is None:
+                            raise ValueError(f"Shard 1 returned None")
+                        print(f"Received from shard 1: shape={output.shape}, dtype={output.dtype}")
+                    else:
+                        # Subsequent shards: send only last token's hidden states
+                        last_hidden = output[:, -1:, :]
+                        print(f"Sending to shard {i+1}: shape={last_hidden.shape}, dtype={last_hidden.dtype}")
+                        tensor_msg = mlx_tensor_pb2.Tensor(
+                            tensor_data=tensor_to_bytes(last_hidden),
+                            shape=list(last_hidden.shape),
+                            dtype=str(last_hidden.dtype)
+                        )
+                        response_msg = stub.SendTensor(tensor_msg)
+                        output = response_to_mlx_array(response_msg)
+                        
+                        if output is None:
+                            raise ValueError(f"Shard {i+1} returned None")
+                        print(f"Received from shard {i+1}: shape={output.shape}, dtype={output.dtype}")
                 
                 # Output from last shard should be logits
                 logits = output[:, -1, :]
@@ -186,8 +203,8 @@ class ChatBot:
                 if token_id in eos_ids:
                     break
                 
-                # Prepare next input (just the new token)
-                current_tokens = mx.array([[token_id]])
+                # Add new token to the list
+                all_tokens.append(token_id)
                 
         except Exception as e:
             import traceback
