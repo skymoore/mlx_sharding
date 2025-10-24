@@ -108,7 +108,7 @@ class ShardingPlanner:
     """
     
     def __init__(self, model_path_or_repo: str, peers: List[PeerInfo],
-                 context_length: int = 8192, safety_margin: float = 0.15):
+                 context_length: int = 8192, safety_margin: float = 0.10):
         """
         Initialize sharding planner.
         
@@ -116,7 +116,7 @@ class ShardingPlanner:
             model_path_or_repo: Path to model or HuggingFace repo
             peers: List of available peers
             context_length: Target context length for KV cache estimation
-            safety_margin: Safety margin as fraction of total memory (default 15%)
+            safety_margin: Safety margin as fraction of total memory (default 10%)
         """
         self.model_path_or_repo = model_path_or_repo
         self.peers = sorted(peers, key=lambda p: p.ram_available_gb, reverse=True)
@@ -203,8 +203,9 @@ class ShardingPlanner:
             available = peer.ram_available_gb * (1 - self.safety_margin)
             # Reserve space for KV cache and overhead
             available_for_layers = available - kv_cache_per_peer - overhead_per_peer
-            # Calculate max layers
-            max_layers = max(1, int(available_for_layers / layer_memory_gb))
+            # Calculate max layers (use floor to be conservative and avoid OOM)
+            import math
+            max_layers = max(1, math.floor(available_for_layers / layer_memory_gb))
             peer_layer_capacity.append(max_layers)
             
             logger.debug(f"Peer {peer.id[:8]}: {available:.1f}GB available, "
