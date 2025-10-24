@@ -127,9 +127,17 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 # Only reduce to last token if this is the last peer (has lm_head)
                 # Intermediate peers need to pass full sequence for KV cache building
                 is_last_peer = hasattr(MODEL, 'lm_head')
+                print(f"🔍 Debug: is_last_peer={is_last_peer}, has_lm_head={hasattr(MODEL, 'lm_head')}, model_type={type(MODEL).__name__}")
+                if hasattr(MODEL, 'start_layer') and hasattr(MODEL, 'end_layer'):
+                    print(f"🔍 Debug: start_layer={MODEL.start_layer}, end_layer={MODEL.end_layer}")
+                if hasattr(MODEL, 'args'):
+                    print(f"🔍 Debug: num_hidden_layers={MODEL.args.num_hidden_layers}")
+                
                 if is_last_peer and len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
                     processed_tensor = processed_tensor[:, -1:, :]
                     print(f"✂️  Reduced to last token: {processed_tensor.shape}")
+                elif len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
+                    print(f"⏩ Passing full sequence (intermediate peer): {processed_tensor.shape}")
                 
                 serialize_start = time.time()
                 processed_bytes = tensor_to_bytes(processed_tensor)
@@ -183,6 +191,17 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
         MODEL = preloaded_model
     else:
         MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+    
+    # Debug: Print model structure
+    print(f"🔍 Model loaded: type={type(MODEL).__name__}")
+    print(f"🔍 Model attributes: {dir(MODEL)}")
+    print(f"🔍 Has lm_head: {hasattr(MODEL, 'lm_head')}")
+    if hasattr(MODEL, 'start_layer'):
+        print(f"🔍 start_layer: {MODEL.start_layer}")
+    if hasattr(MODEL, 'end_layer'):
+        print(f"🔍 end_layer: {MODEL.end_layer}")
+    if hasattr(MODEL, 'args'):
+        print(f"🔍 num_hidden_layers: {MODEL.args.num_hidden_layers}")
     
     reset_cache()
     

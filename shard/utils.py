@@ -357,16 +357,22 @@ def create_coordinator_generate_step(grpc_stubs: List):
             elif y.ndim == 1:  # (seq_len,)
                 y = y.reshape(1, -1)
             
+            logger.info(f"🎯 Coordinator sending to pipeline: shape={y.shape}, dtype={y.dtype}")
+            
             # Send through pipeline
             tensor = y
             for i, stub in enumerate(grpc_stubs):
+                logger.info(f"  → Sending to peer {i}: shape={tensor.shape}, dtype={tensor.dtype}")
                 response = send_tensor(stub, tensor)
                 tensor = response_to_mlx_array(response)
                 if tensor is None:
                     raise ValueError(f"Peer {i} returned None")
+                logger.info(f"  ← Received from peer {i}: shape={tensor.shape}, dtype={tensor.dtype}")
             
             # tensor is now logits from last peer
+            logger.info(f"🎯 Final tensor from pipeline: shape={tensor.shape}, dtype={tensor.dtype}")
             logits = tensor[:, -1, :]
+            logger.info(f"🎯 Extracted logits: shape={logits.shape}")
             
             # Apply logits processors (repetition penalty, logit bias, etc.)
             for processor in logits_processors:
@@ -374,6 +380,7 @@ def create_coordinator_generate_step(grpc_stubs: List):
             
             # Sample next token
             token, logprobs = sample(logits)
+            logger.info(f"🎯 Sampled token: {token.item()}")
             if repetition_penalty:
                 repetition_context.append(token.item())
             if repetition_context_size:
