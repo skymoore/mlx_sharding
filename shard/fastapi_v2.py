@@ -1,0 +1,963 @@
+"""
+FastAPI V2 - Zero-Configuration Distributed Inference API Server
+
+This server:
+1. Runs the orchestrator to discover peers and distribute model
+2. Starts the FastAPI server after setup is complete
+3. Routes inference requests through the distributed system
+"""
+
+import os
+import argparse
+import asyncio
+import logging
+import signal
+import sys
+import time
+import uuid
+from typing import List, Optional, Union, Dict, Any
+from pathlib import Path
+
+# Suppress verbose gRPC error logs
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_TRACE'] = ''
+
+import mlx.core as mx
+from fastapi import FastAPI, HTTPException, Security, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+import uvicorn
+import grpc
+
+from .grpc import mlx_tensor_pb2_grpc
+from mlx_lm.tokenizer_utils import load_tokenizer
+from mlx_lm.utils import hf_repo_to_path
+from .utils import create_generate_step_with_grpc, load_model
+from .tool_calling import (
+    ToolDefinition, ToolCall, ToolCallManager,
+    create_tool_call_manager
+)
+from .orchestrator import Orchestrator
+from .discovery import PeerDiscovery
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+
+# Pydantic models for OpenAI API compatibility
+class Message(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[Message]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    max_tokens: Optional[int] = 2048
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    repetition_penalty: Optional[float] = 1.0
+    repetition_context_size: Optional[int] = 20
+    tools: Optional[List[ToolDefinition]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+
+
+class CompletionRequest(BaseModel):
+    model: str
+    prompt: str
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    max_tokens: Optional[int] = 2048
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "mlx-sharding-v2"
+
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: List[ModelInfo]
+
+
+class OpenWebUIModelList(BaseModel):
+    models: List[ModelInfo]
+
+
+# Global state
+app = FastAPI(title="MLX Sharding V2 API", version="2.0.0")
+model_provider = None
+api_keys: set[str] = set()
+setup_complete = False
+setup_info: Dict[str, Any] = {}
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+
+def load_api_keys() -> set[str]:
+    """Load API keys from environment variable or file."""
+    keys = set()
+    
+    # Load from environment variable (comma-separated)
+    env_keys = os.environ.get("MLX_API_KEYS", "")
+    if env_keys:
+        keys.update(k.strip() for k in env_keys.split(",") if k.strip())
+    
+    # Load from file (one key per line)
+    api_key_file = os.environ.get("MLX_API_KEY_FILE", ".api_keys")
+    if os.path.exists(api_key_file):
+        with open(api_key_file, "r") as f:
+            keys.update(line.strip() for line in f if line.strip() and not line.startswith("#"))
+    
+    return keys
+
+
+async def verify_api_key(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> bool:
+    """Verify API key from Authorization header."""
+    # Skip authentication for health check and setup status
+    if request.url.path in ["/health", "/v1/setup/status"]:
+        return True
+    
+    # If no API keys configured, allow all requests
+    if not api_keys:
+        logging.warning("No API keys configured - authentication disabled")
+        return True
+    
+    # Check for valid credentials
+    if not credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Verify the API key
+    if credentials.credentials not in api_keys:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return True
+
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class MLXModelProvider:
+    """Manages model loading and generation with distributed inference."""
+    
+    def __init__(self, model_path: str, start_layer: Optional[int], end_layer: Optional[int], grpc_stubs: List):
+        self.model_path = model_path
+        self.start_layer = start_layer
+        self.end_layer = end_layer
+        self.grpc_stubs = grpc_stubs
+        
+        # Load model (local layers only)
+        logging.info(f"Loading local model layers from {model_path}")
+        if start_layer is not None and end_layer is not None:
+            logging.info(f"Local layers: {start_layer}-{end_layer}")
+        self.model = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+        
+        # Load tokenizer
+        tokenizer_path = Path(model_path) if Path(model_path).exists() else hf_repo_to_path(model_path)
+        self.tokenizer = load_tokenizer(tokenizer_path)
+        
+        # Create generate function with gRPC stubs
+        self.generate_step = create_generate_step_with_grpc(grpc_stubs)
+        
+        # Model info
+        self.model_name = Path(model_path).name if Path(model_path).exists() else model_path
+        self.created = int(time.time())
+        
+        # Initialize tool call manager
+        model_type = getattr(self.model, 'model_type', 'unknown')
+        self.tool_manager = create_tool_call_manager(model_type)
+        logging.info(f"✓ Model loaded: {self.model_name}")
+        logging.info(f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}")
+    
+    def get_default_stop_sequences(self) -> List[str]:
+        """Get model-specific default stop sequences."""
+        model_type = getattr(self.model, 'model_type', '')
+        
+        # Model-specific stop sequences
+        if model_type == 'qwen3_moe' or model_type.startswith('qwen'):
+            return ["<|im_end|>", "<|endoftext|>"]
+        elif model_type == 'glm4_moe' or model_type.startswith('glm'):
+            return ["<|user|>", "<|endoftext|>", "<|observation|>"]
+        else:
+            # Generic stop sequences
+            return ["<|endoftext|>"]
+    
+    def generate(self, prompt: mx.array, **kwargs):
+        """Generate tokens using the distributed model."""
+        return self.generate_step(
+            prompt=prompt,
+            model=self.model,
+            temp=kwargs.get('temperature', 0.7),
+            top_p=kwargs.get('top_p', 1.0),
+            repetition_penalty=kwargs.get('repetition_penalty', 1.0),
+            repetition_context_size=kwargs.get('repetition_context_size', 20),
+        )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "setup_complete": setup_complete,
+        "version": "2.0.0"
+    }
+
+
+@app.get("/v1/setup/status")
+async def get_setup_status():
+    """Get current setup status and distributed system info."""
+    return {
+        "setup_complete": setup_complete,
+        "setup_info": setup_info,
+        "timestamp": time.time()
+    }
+
+
+@app.get("/v1/models")
+async def list_models(
+    request: Request,
+    authenticated: bool = Security(verify_api_key)
+) -> ModelList:
+    """List available models (OpenAI format)."""
+    if not setup_complete:
+        raise HTTPException(status_code=503, detail="Setup not complete")
+    
+    return ModelList(
+        data=[
+            ModelInfo(
+                id=model_provider.model_name,
+                created=model_provider.created,
+            )
+        ]
+    )
+
+
+@app.get("/api/models")
+async def list_models_openwebui(
+    request: Request,
+    authenticated: bool = Security(verify_api_key)
+) -> OpenWebUIModelList:
+    """List available models (Open WebUI format)."""
+    if not setup_complete:
+        raise HTTPException(status_code=503, detail="Setup not complete")
+    
+    return OpenWebUIModelList(
+        models=[
+            ModelInfo(
+                id=model_provider.model_name,
+                created=model_provider.created,
+            )
+        ]
+    )
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatCompletionRequest,
+    http_request: Request,
+    authenticated: bool = Security(verify_api_key)
+):
+    """Handle chat completion requests with tool calling support."""
+    import json
+    
+    if not setup_complete:
+        raise HTTPException(status_code=503, detail="Setup not complete")
+    
+    # Pretty print request
+    logging.info("=" * 80)
+    logging.info("📥 CHAT COMPLETION REQUEST")
+    logging.info(f"Model: {request.model}")
+    logging.info(f"Messages: {len(request.messages)}")
+    logging.info(f"Stream: {request.stream}")
+    logging.info(f"Max tokens: {request.max_tokens}")
+    logging.info(f"Tools: {len(request.tools) if request.tools else 0}")
+    for i, msg in enumerate(request.messages):
+        content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+        logging.info(f"  [{i}] {msg.role}: {content_preview}")
+    logging.info("=" * 80)
+    
+    try:
+        # Prepare messages
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        
+        # Add tool descriptions to system message if tools provided
+        if request.tools:
+            tool_prompt = model_provider.tool_manager.format_tools_for_prompt(request.tools)
+            # Find or create system message
+            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), None)
+            if system_msg_idx is not None:
+                messages[system_msg_idx]["content"] += tool_prompt
+            else:
+                messages.insert(0, {"role": "system", "content": f"You are a helpful assistant.{tool_prompt}"})
+        
+        # Apply chat template
+        if hasattr(model_provider.tokenizer, "apply_chat_template"):
+            prompt = model_provider.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        else:
+            # Fallback: simple concatenation
+            prompt_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+            prompt = model_provider.tokenizer.encode(prompt_text)
+        
+        prompt_array = mx.array(prompt)
+        
+        # Handle streaming vs non-streaming
+        if request.stream:
+            return StreamingResponse(
+                stream_chat_completion(request, prompt_array),
+                media_type="text/event-stream"
+            )
+        else:
+            return await generate_chat_completion(request, prompt_array)
+    
+    except Exception as e:
+        logging.error(f"Error in chat completion: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/completions")
+async def completions(
+    request: CompletionRequest,
+    http_request: Request,
+    authenticated: bool = Security(verify_api_key)
+):
+    """Handle text completion requests."""
+    if not setup_complete:
+        raise HTTPException(status_code=503, detail="Setup not complete")
+    
+    try:
+        prompt = model_provider.tokenizer.encode(request.prompt)
+        prompt_array = mx.array(prompt)
+        
+        if request.stream:
+            return StreamingResponse(
+                stream_completion(request, prompt_array),
+                media_type="text/event-stream"
+            )
+        else:
+            return await generate_completion(request, prompt_array)
+    
+    except Exception as e:
+        logging.error(f"Error in completion: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def check_stop_sequences(text: str, stop_sequences: List[str]) -> tuple[bool, str]:
+    """Check if text contains any stop sequences and trim if found."""
+    for stop_seq in stop_sequences:
+        if stop_seq in text:
+            # Find the position and trim
+            pos = text.find(stop_seq)
+            return True, text[:pos]
+    return False, text
+
+
+async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.array) -> Dict[str, Any]:
+    """Generate non-streaming chat completion."""
+    tokens = []
+    detokenizer = model_provider.tokenizer.detokenizer
+    detokenizer.reset()
+    
+    # Prepare stop sequences
+    stop_sequences = []
+    if request.stop:
+        if isinstance(request.stop, str):
+            stop_sequences = [request.stop]
+        else:
+            stop_sequences = request.stop
+    
+    # Add model-specific default stop sequences
+    stop_sequences.extend(model_provider.get_default_stop_sequences())
+    
+    finish_reason = "length"
+    
+    for (token, _), _ in zip(
+        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+        range(request.max_tokens)
+    ):
+        tokens.append(token)
+        detokenizer.add_token(token)
+        
+        # Check for EOS token
+        if token == model_provider.tokenizer.eos_token_id:
+            finish_reason = "stop"
+            break
+        
+        # Check for stop sequences in generated text
+        current_text = detokenizer.text
+        stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
+        if stop_found:
+            finish_reason = "stop"
+            break
+    
+    detokenizer.finalize()
+    text = detokenizer.text
+    
+    # Final check and trim stop sequences
+    _, text = check_stop_sequences(text, stop_sequences)
+    
+    # Parse tool calls if tools were provided
+    cleaned_content = text
+    tool_calls = []
+    if request.tools:
+        cleaned_content, tool_calls = model_provider.tool_manager.parse(text)
+    
+    # Build response
+    response = {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": cleaned_content,
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(prompt),
+            "completion_tokens": len(tokens),
+            "total_tokens": len(prompt) + len(tokens),
+        },
+    }
+    
+    # Add tool_calls if any were found
+    if tool_calls:
+        response["choices"][0]["message"]["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": tc.function
+            }
+            for tc in tool_calls
+        ]
+        # When tool calls present, finish_reason should be "tool_calls"
+        response["choices"][0]["finish_reason"] = "tool_calls"
+    
+    # Pretty print response
+    logging.info("=" * 80)
+    logging.info("📤 CHAT COMPLETION RESPONSE")
+    logging.info(f"Finish reason: {response['choices'][0]['finish_reason']}")
+    content = response['choices'][0]['message']['content']
+    content_preview = content[:200] + "..." if len(content) > 200 else content
+    logging.info(f"Content: {content_preview}")
+    if 'tool_calls' in response['choices'][0]['message']:
+        logging.info(f"Tool calls: {len(response['choices'][0]['message']['tool_calls'])}")
+        for tc in response['choices'][0]['message']['tool_calls']:
+            logging.info(f"  - {tc['function']['name']}")
+    logging.info(f"Tokens: {response['usage']['total_tokens']}")
+    logging.info("=" * 80)
+    
+    return response
+
+
+async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.array):
+    """Generate streaming chat completion with tool call support."""
+    import json
+    import asyncio
+    
+    request_id = f"chatcmpl-{uuid.uuid4()}"
+    created = int(time.time())
+    detokenizer = model_provider.tokenizer.detokenizer
+    detokenizer.reset()
+    
+    # Create streaming parser if tools provided
+    streaming_parser = None
+    if request.tools:
+        streaming_parser = model_provider.tool_manager.create_streaming_parser()
+    
+    # Prepare stop sequences
+    stop_sequences = []
+    if request.stop:
+        if isinstance(request.stop, str):
+            stop_sequences = [request.stop]
+        else:
+            stop_sequences = request.stop
+    stop_sequences.extend(model_provider.get_default_stop_sequences())
+    
+    finish_reason = "length"
+    
+    try:
+        for (token, _), _ in zip(
+            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            range(request.max_tokens)
+        ):
+            detokenizer.add_token(token)
+            
+            # Check for EOS
+            if token == model_provider.tokenizer.eos_token_id:
+                finish_reason = "stop"
+                break
+            
+            # Check for stop sequences in full text
+            current_text = detokenizer.text
+            stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
+            if stop_found:
+                finish_reason = "stop"
+                break
+            
+            # Get the segment to send
+            text = detokenizer.last_segment
+            
+            # Check if this segment contains a stop sequence
+            if text:
+                segment_stop_found, trimmed_segment = check_stop_sequences(text, stop_sequences)
+                if segment_stop_found:
+                    finish_reason = "stop"
+                    text = trimmed_segment
+                
+                # Parse for tool calls if enabled
+                if streaming_parser and text:
+                    content_to_emit, new_tool_calls = streaming_parser.add_chunk(text)
+                    
+                    # Emit content chunk if any
+                    if content_to_emit:
+                        chunk = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [{"index": 0, "delta": {"content": content_to_emit}, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    
+                    # Emit tool call chunks if any
+                    for tool_call in new_tool_calls:
+                        chunk = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": 0,
+                                        "id": tool_call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_call.function["name"],
+                                            "arguments": tool_call.function["arguments"]
+                                        }
+                                    }]
+                                },
+                                "finish_reason": None
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                elif text:
+                    # No tool parsing, send text directly
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                
+                await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
+                
+                if segment_stop_found:
+                    break
+        
+        # Finalize - get any remaining content
+        if streaming_parser:
+            remaining_content, remaining_tool_calls = streaming_parser.finalize()
+            
+            if remaining_content:
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            
+            for tool_call in remaining_tool_calls:
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function["name"],
+                                    "arguments": tool_call.function["arguments"]
+                                }
+                            }]
+                        },
+                        "finish_reason": None
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # Update finish_reason if tool calls were emitted
+            if streaming_parser.emitted_tool_calls:
+                finish_reason = "tool_calls"
+        
+        # Send final chunk
+        final_chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": request.model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+    
+    except GeneratorExit:
+        # Client disconnected
+        logging.info(f"Client disconnected during streaming (request {request_id})")
+        raise
+    
+    except Exception as e:
+        logging.error(f"Error in streaming: {e}", exc_info=True)
+        try:
+            error_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        except GeneratorExit:
+            pass
+
+
+async def generate_completion(request: CompletionRequest, prompt: mx.array) -> Dict[str, Any]:
+    """Generate non-streaming completion."""
+    tokens = []
+    detokenizer = model_provider.tokenizer.detokenizer
+    detokenizer.reset()
+    
+    for (token, _), _ in zip(
+        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+        range(request.max_tokens)
+    ):
+        tokens.append(token)
+        detokenizer.add_token(token)
+        
+        if token == model_provider.tokenizer.eos_token_id:
+            break
+    
+    detokenizer.finalize()
+    text = detokenizer.text
+    
+    return {
+        "id": f"cmpl-{uuid.uuid4()}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": request.model,
+        "choices": [
+            {
+                "index": 0,
+                "text": text,
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(prompt),
+            "completion_tokens": len(tokens),
+            "total_tokens": len(prompt) + len(tokens),
+        },
+    }
+
+
+async def stream_completion(request: CompletionRequest, prompt: mx.array):
+    """Generate streaming completion."""
+    import json
+    import asyncio
+    
+    request_id = f"cmpl-{uuid.uuid4()}"
+    detokenizer = model_provider.tokenizer.detokenizer
+    detokenizer.reset()
+    
+    try:
+        for (token, _), _ in zip(
+            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            range(request.max_tokens)
+        ):
+            detokenizer.add_token(token)
+            text = detokenizer.last_segment
+            
+            if text:
+                chunk = {
+                    "id": request_id,
+                    "object": "text_completion",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": text,
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                
+                yield f"data: {json.dumps(chunk)}\n\n"
+                await asyncio.sleep(0.001)
+            
+            if token == model_provider.tokenizer.eos_token_id:
+                break
+        
+        yield "data: [DONE]\n\n"
+    
+    except GeneratorExit:
+        logging.info(f"Client disconnected during streaming (request {request_id})")
+        raise
+    
+    except Exception as e:
+        logging.error(f"Error in streaming: {e}", exc_info=True)
+        try:
+            yield "data: [DONE]\n\n"
+        except GeneratorExit:
+            pass
+
+
+async def run_orchestrator_setup(model_path: str, local_layers: bool, 
+                                 grpc_port: int, http_port: int) -> Dict[str, Any]:
+    """Run the orchestrator setup process."""
+    global setup_complete, setup_info, model_provider
+    
+    logger.info("=" * 80)
+    logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP")
+    logger.info("=" * 80)
+    
+    # Create orchestrator
+    orchestrator = Orchestrator(
+        model_path=model_path,
+        local_layers=local_layers,
+        grpc_port=grpc_port,
+        http_port=http_port
+    )
+    
+    # Progress callback
+    def progress_callback(message: str):
+        logger.info(f"[SETUP] {message}")
+    
+    # Run setup
+    try:
+        result = await orchestrator.setup(progress_callback=progress_callback)
+        
+        logger.info("=" * 80)
+        logger.info("✓ SETUP COMPLETE")
+        logger.info(f"  Peers: {len(result['peers'])}")
+        logger.info(f"  Plan: {result['plan']}")
+        logger.info("=" * 80)
+        
+        # Store setup info
+        setup_info = {
+            "peers": result["peers"],
+            "plan": result["plan"],
+            "coordinator_id": result["coordinator_id"],
+            "model_path": model_path,
+            "local_layers": local_layers
+        }
+        
+        # Extract gRPC stubs and local layer assignment
+        grpc_stubs = []
+        local_start = None
+        local_end = None
+        
+        for peer_id, peer_info in result["peers"].items():
+            if peer_info.get("is_local"):
+                # This is the local peer
+                assignment = peer_info.get("assignment")
+                if assignment:
+                    local_start = assignment["start_layer"]
+                    local_end = assignment["end_layer"]
+            else:
+                # Remote peer - create gRPC stub
+                grpc_addr = f"{peer_info['ip']}:{peer_info['grpc_port']}"
+                channel_options = [
+                    ('grpc.max_metadata_size', 64 * 1024 * 1024),
+                    ('grpc.max_send_message_length', -1),
+                    ('grpc.max_receive_message_length', -1),
+                    ('grpc.http2.max_frame_size', 16 * 1024 * 1024),
+                    ('grpc.http2.min_recv_ping_interval_without_data_ms', 300000),
+                ]
+                channel = grpc.insecure_channel(grpc_addr, options=channel_options)
+                stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
+                grpc_stubs.append(stub)
+                logger.info(f"✓ Connected to remote peer: {grpc_addr}")
+        
+        # Initialize model provider
+        model_provider = MLXModelProvider(
+            model_path=model_path,
+            start_layer=local_start,
+            end_layer=local_end,
+            grpc_stubs=grpc_stubs
+        )
+        
+        setup_complete = True
+        return result
+    
+    except Exception as e:
+        logger.error(f"Setup failed: {e}", exc_info=True)
+        raise
+
+
+def main():
+    """Main entry point for V2 API server."""
+    parser = argparse.ArgumentParser(
+        description="MLX Sharding V2 - Zero-Configuration Distributed Inference API"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        help="Path to MLX model or HuggingFace repo"
+    )
+    parser.add_argument(
+        "--local-layers",
+        action="store_true",
+        default=True,
+        help="Include local machine as a peer (default: True)"
+    )
+    parser.add_argument(
+        "--no-local-layers",
+        action="store_true",
+        help="Exclude local machine from inference (coordinator only)"
+    )
+    parser.add_argument(
+        "--grpc-port",
+        type=int,
+        default=50051,
+        help="gRPC port for local peer (default: 50051)"
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=8080,
+        help="HTTP API port (default: 8080)"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level"
+    )
+    parser.add_argument(
+        "--cache-limit-gb",
+        type=int,
+        default=None,
+        help="MLX cache limit in GB"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    
+    # Set cache limit
+    if args.cache_limit_gb:
+        mx.metal.set_cache_limit(args.cache_limit_gb * 1024 * 1024 * 1024)
+    
+    # Load API keys
+    global api_keys
+    api_keys = load_api_keys()
+    if api_keys:
+        logging.info(f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)")
+    else:
+        logging.warning("⚠ No API keys configured - authentication disabled!")
+    
+    # Determine local_layers setting
+    local_layers = args.local_layers and not args.no_local_layers
+    
+    # Run orchestrator setup in background
+    async def startup():
+        try:
+            await run_orchestrator_setup(
+                model_path=args.model,
+                local_layers=local_layers,
+                grpc_port=args.grpc_port,
+                http_port=args.http_port
+            )
+        except Exception as e:
+            logging.error(f"Fatal setup error: {e}")
+            sys.exit(1)
+    
+    # Run setup before starting server
+    asyncio.run(startup())
+    
+    # Setup signal handlers
+    def signal_handler(sig, frame):
+        logging.info("\nShutting down server...")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Start FastAPI server
+    logging.info(f"🚀 Starting API server on 0.0.0.0:{args.http_port}")
+    logging.info(f"   OpenAI API: http://0.0.0.0:{args.http_port}/v1")
+    logging.info(f"   Health: http://0.0.0.0:{args.http_port}/health")
+    logging.info(f"   Setup Status: http://0.0.0.0:{args.http_port}/v1/setup/status")
+    logging.info("Press Ctrl+C to stop")
+    
+    try:
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=args.http_port,
+            log_level=args.log_level.lower(),
+            access_log=False
+        )
+    except KeyboardInterrupt:
+        logging.info("\nServer stopped")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -75,6 +75,7 @@ class PeerServer:
         self.assignment: Optional[ShardAssignment] = None
         self.coordinator_id: Optional[str] = None
         self.file_buffers: Dict[str, Dict] = {}  # For chunked file reception
+        self.local_model_path: Optional[str] = None  # For localhost peers using local files
         
         # gRPC server thread
         self.grpc_thread: Optional[threading.Thread] = None
@@ -133,6 +134,31 @@ class PeerServer:
             logger.info(f"Unclaimed from coordinator {old_coordinator[:8] if old_coordinator else 'none'}")
             
             return {"success": True, "message": "Peer unclaimed"}
+        
+        @self.app.post("/api/set_local_model_path")
+        async def set_local_model_path(request: Request):
+            """Set local model path for localhost peers (avoids file transfer)."""
+            try:
+                data = await request.json()
+                model_path = data.get("model_path")
+                
+                if not model_path:
+                    raise HTTPException(status_code=400, detail="model_path required")
+                
+                from pathlib import Path
+                if not Path(model_path).exists():
+                    raise HTTPException(status_code=400, detail=f"Model path does not exist: {model_path}")
+                
+                self.local_model_path = model_path
+                logger.info(f"Local model path set to: {model_path}")
+                
+                return {"success": True, "message": "Local model path set", "path": model_path}
+            
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error setting local model path: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.post("/api/receive_file_chunk")
         async def receive_file_chunk(
@@ -245,10 +271,16 @@ class PeerServer:
                 
                 logger.info(f"Loading model: {model_name} layers {start_layer}-{end_layer}")
                 
-                # Load model from cache
-                model_path = self.cache_dir / model_name
+                # Determine model path - use local path if set (for localhost peers), otherwise use cache
+                if self.local_model_path:
+                    model_path = Path(self.local_model_path)
+                    logger.info(f"Using local model path: {model_path}")
+                else:
+                    model_path = self.cache_dir / model_name
+                    logger.info(f"Using cached model path: {model_path}")
+                
                 if not model_path.exists():
-                    raise FileNotFoundError(f"Model not found in cache: {model_path}")
+                    raise FileNotFoundError(f"Model not found at: {model_path}")
                 
                 self.model = load_model(
                     str(model_path),

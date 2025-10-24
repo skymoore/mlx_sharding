@@ -28,6 +28,7 @@ Homepage = "https://github.com/mzbac/mlx_sharding"
 [project.scripts]
 mlx-sharding-server = "shard.main:main"
 mlx-sharding-api = "shard.openai_api:main"
+mlx-sharding-api-v2 = "shard.fastapi_v2:main"
 mlx-sharding-chat = "shard.gradio_chat:main"
 mlx-shard-peer = "shard.peer:main"
 
@@ -55,6 +56,7 @@ gradio = "^5.0.0"
 [tool.poetry.scripts]
 mlx-sharding-server = "shard.main:main"
 mlx-sharding-api = "shard.openai_api:main"
+mlx-sharding-api-v2 = "shard.fastapi_v2:main"
 mlx-sharding-chat = "shard.gradio_chat:main"
 mlx-shard-peer = "shard.peer:main"
 

@@ -129,6 +129,13 @@ class ModelFileDistributor:
         logger.info(f"Distributing files to peer {peer.id[:8]} @ {peer.host}:{peer.http_port}")
         
         try:
+            # Check if peer is on localhost - if so, skip file transfer
+            if self._is_localhost(peer.host):
+                logger.info(f"  ✓ Peer is on localhost - using local model files (no transfer needed)")
+                # Still need to tell the peer about the local path
+                await self._set_local_model_path(peer, self.model_path)
+                return True
+            
             # Get list of required files
             required_files = self._get_required_files()
             logger.info(f"  Required files: {len(required_files)}")
@@ -310,3 +317,104 @@ class ModelFileDistributor:
             for chunk in iter(lambda: f.read(8192), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
+    
+    def _is_localhost(self, host: str) -> bool:
+        """
+        Check if a host is localhost by comparing against all local network interfaces.
+        Uses psutil for reliable cross-platform interface enumeration.
+        
+        Args:
+            host: Host address to check
+            
+        Returns:
+            True if host is localhost
+        """
+        import socket
+        import psutil
+        
+        localhost_names = ['localhost', '127.0.0.1', '::1', '0.0.0.0', '::']
+        
+        # Check direct localhost names
+        if host in localhost_names:
+            return True
+        
+        try:
+            # Get all local IP addresses from all network interfaces using psutil
+            local_ips = set(localhost_names)
+            
+            # Use psutil to get all network interface addresses
+            net_if_addrs = psutil.net_if_addrs()
+            for interface_name, addr_list in net_if_addrs.items():
+                for addr in addr_list:
+                    # addr.family can be AF_INET (IPv4) or AF_INET6 (IPv6)
+                    if addr.family == socket.AF_INET or addr.family == socket.AF_INET6:
+                        local_ips.add(addr.address)
+            
+            # Also try hostname resolution as fallback
+            try:
+                local_hostname = socket.gethostname()
+                local_fqdn = socket.getfqdn()
+                
+                # Add hostname IPs
+                try:
+                    for ip in socket.gethostbyname_ex(local_hostname)[2]:
+                        local_ips.add(ip)
+                except Exception:
+                    pass
+                
+                # Add FQDN IPs
+                try:
+                    for ip in socket.gethostbyname_ex(local_fqdn)[2]:
+                        local_ips.add(ip)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            
+            # Check if peer host matches any local IP
+            if host in local_ips:
+                return True
+            
+            # Try to resolve peer hostname to IP and check intersection
+            try:
+                peer_ips = set()
+                for info in socket.getaddrinfo(host, None):
+                    ip_addr = info[4][0]
+                    if isinstance(ip_addr, str):
+                        peer_ips.add(ip_addr)
+                if peer_ips & local_ips:  # Intersection
+                    return True
+            except socket.gaierror:
+                pass
+        
+        except Exception as e:
+            logger.warning(f"Error checking localhost: {e}")
+        
+        return False
+    
+    async def _set_local_model_path(self, peer: PeerInfo, model_path: Path):
+        """
+        Tell a localhost peer to use the local model path instead of cache.
+        
+        Args:
+            peer: Target peer (must be localhost)
+            model_path: Local model path to use
+        """
+        try:
+            url = f"http://{peer.host}:{peer.http_port}/api/set_local_model_path"
+            data = {"model_path": str(model_path)}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=data, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        logger.info(f"  ✓ Peer configured to use local path: {model_path}")
+                        return True
+                    else:
+                        logger.warning(f"Failed to set local model path: HTTP {resp.status}")
+                        return False
+        
+        except Exception as e:
+            logger.warning(f"Failed to set local model path: {e}")
+            # Not critical - peer can still use cache
+            return False
