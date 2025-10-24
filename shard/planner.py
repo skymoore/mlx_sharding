@@ -242,9 +242,15 @@ class ShardingPlanner:
             # TODO: Integrate network path selection
             grpc_address = f"{peer.host}:{peer.grpc_port}"
             
-            # Model loading treats end_layer as inclusive, so we need to subtract 1
-            # from our exclusive end_layer to get the correct inclusive end
-            end_layer_inclusive = end_layer - 1
+            # Model loading treats end_layer as inclusive for intermediate layers,
+            # but the LAST peer needs end_layer == total_layers to get the LM head
+            is_last_peer = (end_layer == self.total_layers)
+            if is_last_peer:
+                # Last peer: keep end_layer == total_layers for LM head
+                end_layer_inclusive = end_layer
+            else:
+                # Intermediate peer: subtract 1 to avoid overlap
+                end_layer_inclusive = end_layer - 1
             
             shard = ShardAssignment(
                 peer_id=peer.id,
@@ -254,13 +260,14 @@ class ShardingPlanner:
                 end_layer=end_layer_inclusive,
                 estimated_memory_gb=shard_memory,
                 has_embedding=(current_layer == 0),
-                has_lm_head=(end_layer == self.total_layers),
+                has_lm_head=is_last_peer,
             )
             
             shards.append(shard)
             
-            logger.info(f"Assigned layers {current_layer}-{end_layer_inclusive} (inclusive) to peer {peer.id[:8]} "
-                       f"({shard_memory:.1f}GB)")
+            lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
+            logger.info(f"Assigned layers {current_layer}-{end_layer_inclusive} to peer {peer.id[:8]} "
+                       f"({shard_memory:.1f}GB){lm_head_note}")
             
             current_layer = end_layer
             
