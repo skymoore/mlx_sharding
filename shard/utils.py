@@ -285,3 +285,110 @@ def create_generate_step_with_grpc(grpc_stubs: List):
             y, logprobs = next_y, next_logprobs
 
     return generate_step
+
+
+def create_coordinator_generate_step(grpc_stubs: List):
+    """
+    Create generation function for coordinator-only mode (no local model).
+    Coordinator sends tokens through pipeline and samples from returned logits.
+    
+    Pipeline flow:
+    1. Coordinator sends token IDs (int32) to first peer
+    2. First peer embeds tokens and processes through its layers
+    3. Each subsequent peer processes hidden states through its layers
+    4. Last peer returns logits to coordinator
+    5. Coordinator samples next token and repeats
+    
+    Args:
+        grpc_stubs: Ordered list of gRPC stubs (by layer range)
+    
+    Returns:
+        Generator function that yields (token, logprobs) tuples
+    """
+    def generate_step(
+        prompt: mx.array,  # Token IDs from tokenizer
+        temp: float = 0.0,
+        repetition_penalty: Optional[float] = None,
+        repetition_context_size: Optional[int] = 20,
+        top_p: float = 1.0,
+        logit_bias: Optional[Dict[int, float]] = None,
+    ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+        
+        # Reset all peer caches at start of generation
+        for stub in grpc_stubs:
+            reset_response = stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest())
+            logger.debug(f"ResetCache Response: {reset_response.message}")
+        
+        def sample(logits: mx.array) -> Tuple[mx.array, mx.array]:
+            """Sample next token from logits."""
+            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+            if temp == 0:
+                token = mx.argmax(logits, axis=-1)
+            else:
+                if top_p > 0 and top_p < 1.0:
+                    modified_logprobs = apply_top_p(logprobs, top_p)
+                    token = mx.random.categorical(modified_logprobs * (1 / temp))
+                else:
+                    token = mx.random.categorical(logits * (1 / temp))
+            return token, logprobs
+        
+        # Initialize
+        y = prompt  # Token IDs (int32)
+        repetition_context = prompt.tolist()
+        if repetition_context_size:
+            repetition_context = repetition_context[-repetition_context_size:]
+        
+        # Create logits processors
+        logits_processors = make_logits_processors(
+            logit_bias=logit_bias,
+            repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size
+        )
+        
+        def _step(y):
+            """Process one generation step through the pipeline."""
+            nonlocal repetition_context
+            
+            # Ensure y is int32 token IDs with shape (batch, seq_len)
+            if y.dtype != mx.int32:
+                y = y.astype(mx.int32)
+            if y.ndim == 0:  # scalar
+                y = y.reshape(1, 1)
+            elif y.ndim == 1:  # (seq_len,)
+                y = y.reshape(1, -1)
+            
+            # Send through pipeline
+            tensor = y
+            for i, stub in enumerate(grpc_stubs):
+                response = send_tensor(stub, tensor)
+                tensor = response_to_mlx_array(response)
+                if tensor is None:
+                    raise ValueError(f"Peer {i} returned None")
+            
+            # tensor is now logits from last peer
+            logits = tensor[:, -1, :]
+            
+            # Apply logits processors (repetition penalty, logit bias, etc.)
+            for processor in logits_processors:
+                logits = processor(mx.array(repetition_context), logits)
+            
+            # Sample next token
+            token, logprobs = sample(logits)
+            if repetition_penalty:
+                repetition_context.append(token.item())
+            if repetition_context_size:
+                if len(repetition_context) > repetition_context_size:
+                    repetition_context = repetition_context[-repetition_context_size:]
+            
+            return token, logprobs.squeeze(0)
+        
+        # Generate tokens
+        y, logprobs = _step(y)
+        mx.async_eval(y)
+        while True:
+            next_y, next_logprobs = _step(y)
+            mx.async_eval(next_y)
+            yield y.item(), logprobs
+            y, logprobs = next_y, next_logprobs
+    
+    return generate_step

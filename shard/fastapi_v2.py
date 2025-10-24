@@ -10,6 +10,7 @@ This server:
 import os
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -34,7 +35,7 @@ import grpc
 from .grpc import mlx_tensor_pb2_grpc
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import hf_repo_to_path
-from .utils import create_generate_step_with_grpc, load_model
+from .utils import create_generate_step_with_grpc, create_coordinator_generate_step, load_model
 from .tool_calling import (
     ToolDefinition, ToolCall, ToolCallManager,
     create_tool_call_manager
@@ -173,27 +174,38 @@ class MLXModelProvider:
         self.end_layer = end_layer
         self.grpc_stubs = grpc_stubs
         
-        # Load model (local layers only)
-        logging.info(f"Loading local model layers from {model_path}")
-        if start_layer is not None and end_layer is not None:
-            logging.info(f"Local layers: {start_layer}-{end_layer}")
-        self.model = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
-        
-        # Load tokenizer
+        # Load tokenizer (always needed)
         tokenizer_path = Path(model_path) if Path(model_path).exists() else hf_repo_to_path(model_path)
         self.tokenizer = load_tokenizer(tokenizer_path)
         
-        # Create generate function with gRPC stubs
-        self.generate_step = create_generate_step_with_grpc(grpc_stubs)
+        # Coordinator mode: no local layers
+        if start_layer is None and end_layer is None:
+            logging.info("Coordinator-only mode: no local model, pipeline coordination only")
+            self.model = None
+            self.generate_step = create_coordinator_generate_step(grpc_stubs)
+            
+            # Get model type from config for tool calling
+            config_path = tokenizer_path / "config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+                    model_type = config.get('model_type', 'unknown')
+            else:
+                model_type = 'unknown'
+        else:
+            # Peer mode: load local layers
+            logging.info(f"Peer mode: loading layers {start_layer}-{end_layer}")
+            self.model = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+            self.generate_step = create_generate_step_with_grpc(grpc_stubs)
+            model_type = getattr(self.model, 'model_type', 'unknown')
         
         # Model info
         self.model_name = Path(model_path).name if Path(model_path).exists() else model_path
         self.created = int(time.time())
         
         # Initialize tool call manager
-        model_type = getattr(self.model, 'model_type', 'unknown')
         self.tool_manager = create_tool_call_manager(model_type)
-        logging.info(f"✓ Model loaded: {self.model_name}")
+        logging.info(f"✓ Model provider initialized: {self.model_name}")
         logging.info(f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}")
     
     def get_default_stop_sequences(self) -> List[str]:
@@ -211,14 +223,25 @@ class MLXModelProvider:
     
     def generate(self, prompt: mx.array, **kwargs):
         """Generate tokens using the distributed model."""
-        return self.generate_step(
-            prompt=prompt,
-            model=self.model,
-            temp=kwargs.get('temperature', 0.7),
-            top_p=kwargs.get('top_p', 1.0),
-            repetition_penalty=kwargs.get('repetition_penalty', 1.0),
-            repetition_context_size=kwargs.get('repetition_context_size', 20),
-        )
+        # Coordinator mode doesn't need model parameter
+        if self.model is None:
+            return self.generate_step(
+                prompt=prompt,
+                temp=kwargs.get('temperature', 0.7),
+                top_p=kwargs.get('top_p', 1.0),
+                repetition_penalty=kwargs.get('repetition_penalty', 1.0),
+                repetition_context_size=kwargs.get('repetition_context_size', 20),
+            )
+        else:
+            # Peer mode needs model parameter
+            return self.generate_step(
+                prompt=prompt,
+                model=self.model,
+                temp=kwargs.get('temperature', 0.7),
+                top_p=kwargs.get('top_p', 1.0),
+                repetition_penalty=kwargs.get('repetition_penalty', 1.0),
+                repetition_context_size=kwargs.get('repetition_context_size', 20),
+            )
 
 
 @app.get("/health")
