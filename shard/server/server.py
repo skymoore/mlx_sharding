@@ -173,9 +173,15 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             )
 
 
-def serve(model_path, start_layer=None, end_layer=None, port=50051):
+def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None):
     global MODEL
-    MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+    
+    # Use preloaded model if provided (V2 architecture), otherwise load it (V1 architecture)
+    if preloaded_model is not None:
+        MODEL = preloaded_model
+    else:
+        MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+    
     reset_cache()
     
     # Start cleanup thread

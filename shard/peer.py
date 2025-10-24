@@ -119,6 +119,21 @@ class PeerServer:
             
             return {"success": True, "message": "Peer claimed"}
         
+        @self.app.post("/api/unclaim")
+        async def unclaim_peer(coordinator_id: Optional[str] = None):
+            """Release this peer from coordinator claim."""
+            if coordinator_id and self.coordinator_id != coordinator_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cannot unclaim: claimed by different coordinator {self.coordinator_id}"
+                )
+            
+            old_coordinator = self.coordinator_id
+            self.coordinator_id = None
+            logger.info(f"Unclaimed from coordinator {old_coordinator[:8] if old_coordinator else 'none'}")
+            
+            return {"success": True, "message": "Peer unclaimed"}
+        
         @self.app.post("/api/receive_file_chunk")
         async def receive_file_chunk(
             model_name: str = Form(...),
@@ -243,7 +258,7 @@ class PeerServer:
                 
                 # Start gRPC server now that model is loaded
                 if self.grpc_thread is None:
-                    self.start_grpc_server()
+                    self.start_grpc_server(str(model_path), start_layer, end_layer)
                 
                 self.state = "ready"
                 
@@ -280,16 +295,15 @@ class PeerServer:
             logger.info("Model unloaded")
             return {"success": True, "message": "Model unloaded"}
     
-    def start_grpc_server(self):
+    def start_grpc_server(self, model_path: str, start_layer: int, end_layer: int):
         """Start gRPC server in background thread (only after model is loaded)."""
         if self.model is None:
             logger.warning("Cannot start gRPC server without a loaded model")
             return
         
         def run_grpc():
-            # The gRPC server will use the globally loaded MODEL
-            # This is set when load_model is called
-            grpc_serve(None, None, None, self.grpc_port)
+            # Start gRPC server with preloaded model (V2 architecture)
+            grpc_serve(model_path, start_layer, end_layer, self.grpc_port, preloaded_model=self.model)
         
         self.grpc_thread = threading.Thread(target=run_grpc, daemon=True)
         self.grpc_thread.start()
