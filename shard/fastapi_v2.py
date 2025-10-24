@@ -465,7 +465,9 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
         detokenizer.add_token(token)
         
         # Check for stop tokens by ID (faster and more reliable)
-        if token in stop_token_ids:
+        # Convert MLX array to Python int for comparison
+        token_id = int(token.item()) if hasattr(token, 'item') else int(token)
+        if token_id in stop_token_ids:
             finish_reason = "stop"
             break
         
@@ -584,7 +586,9 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             detokenizer.add_token(token)
             
             # Check for stop tokens by ID (faster and more reliable)
-            if token in stop_token_ids:
+            # Convert MLX array to Python int for comparison
+            token_id = int(token.item()) if hasattr(token, 'item') else int(token)
+            if token_id in stop_token_ids:
                 finish_reason = "stop"
                 break
             
