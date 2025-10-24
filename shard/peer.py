@@ -197,9 +197,29 @@ class PeerServer:
                 if len(self.file_buffers[file_key]["chunks"]) == total_chunks:
                     # Reassemble file
                     file_path = self.file_buffers[file_key]["file_path"]
+                    
+                    import hashlib
+                    hasher = hashlib.sha256()
+                    
                     with open(file_path, "wb") as f:
                         for i in range(total_chunks):
-                            f.write(self.file_buffers[file_key]["chunks"][i])
+                            chunk = self.file_buffers[file_key]["chunks"][i]
+                            f.write(chunk)
+                            hasher.update(chunk)
+                    
+                    # Save hash to metadata file
+                    hash_file = model_cache / ".hashes.json"
+                    hashes = {}
+                    if hash_file.exists():
+                        import json
+                        with open(hash_file, "r") as f:
+                            hashes = json.load(f)
+                    
+                    hashes[file_name] = hasher.hexdigest()
+                    
+                    import json
+                    with open(hash_file, "w") as f:
+                        json.dump(hashes, f, indent=2)
                     
                     # Clean up buffer
                     del self.file_buffers[file_key]
@@ -227,20 +247,41 @@ class PeerServer:
         async def check_cache(model: str):
             """Check which files are already cached."""
             import hashlib
+            import json
             
             model_cache = self.cache_dir / model
             if not model_cache.exists():
                 return {}
             
+            # Try to load cached hashes first
+            hash_file = model_cache / ".hashes.json"
+            if hash_file.exists():
+                try:
+                    with open(hash_file, "r") as f:
+                        hashes = json.load(f)
+                    logger.info(f"Cache check for {model}: {len(hashes)} files cached (from metadata)")
+                    return hashes
+                except Exception as e:
+                    logger.warning(f"Failed to load hash cache: {e}, recomputing...")
+            
+            # Fallback: compute hashes (slow for large models)
+            logger.info(f"Computing hashes for {model} (this may take a while for large models)...")
             hashes = {}
             for file_path in model_cache.glob("*"):
-                if file_path.is_file():
+                if file_path.is_file() and file_path.name != ".hashes.json":
                     # Compute hash
                     hasher = hashlib.sha256()
                     with open(file_path, "rb") as f:
                         for chunk in iter(lambda: f.read(8192), b""):
                             hasher.update(chunk)
                     hashes[file_path.name] = hasher.hexdigest()
+            
+            # Save computed hashes for next time
+            try:
+                with open(hash_file, "w") as f:
+                    json.dump(hashes, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to save hash cache: {e}")
             
             logger.info(f"Cache check for {model}: {len(hashes)} files cached")
             return hashes

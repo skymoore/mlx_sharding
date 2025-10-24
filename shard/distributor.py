@@ -221,16 +221,21 @@ class ModelFileDistributor:
             url = f"http://{host}:{peer.http_port}/api/cache/check"
             params = {"model": self.model_path.name}
             
+            logger.debug(f"Checking cache at {url} with params {params}")
+            
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                # Increase timeout - computing hashes for large models takes time (up to 10 minutes)
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=600)) as resp:
                     if resp.status == 200:
-                        return await resp.json()
+                        result = await resp.json()
+                        logger.info(f"Cache check successful: {len(result)} files found")
+                        return result
                     else:
                         logger.warning(f"Cache check failed: HTTP {resp.status}")
                         return {}
         
         except Exception as e:
-            logger.warning(f"Failed to check peer cache: {e}")
+            logger.warning(f"Failed to check peer cache at {host}:{peer.http_port}: {type(e).__name__}: {e}")
             return {}
     
     async def _transfer_file(self,
