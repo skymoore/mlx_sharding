@@ -40,6 +40,7 @@ class PeerInfo:
     layers_loaded: str
     version: str
     last_seen: float
+    network_interfaces: Optional[Dict[str, Dict]] = None  # Network interface info
     
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
