@@ -327,7 +327,7 @@ def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
         
         # Reset all peer caches at start of generation
         for stub in grpc_stubs:
-            reset_response = stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest())
+            reset_response = stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest(session_id=session_id))
             logger.debug(f"ResetCache Response: {reset_response.message}")
         
         def sample(logits: mx.array) -> Tuple[mx.array, mx.array]:
