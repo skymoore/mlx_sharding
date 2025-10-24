@@ -72,8 +72,8 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051):
     reset_cache()
     server_options = [
         ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
-        ('grpc.max_send_message_length', 4 * 1024 * 1024 * 1024),  # 4GB send
-        ('grpc.max_receive_message_length', 4 * 1024 * 1024 * 1024),  # 4GB receive
+        ('grpc.max_send_message_length', -1),  # Unlimited send
+        ('grpc.max_receive_message_length', -1),  # Unlimited receive
         ('grpc.http2.max_frame_size', 16 * 1024 * 1024),  # 16MB frames
     ]
     server = grpc.server(futures.ThreadPoolExecutor(

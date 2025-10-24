@@ -30,8 +30,8 @@ def main():
 
     channel_options = [
         ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
-        ('grpc.max_send_message_length', 4 * 1024 * 1024 * 1024),  # 4GB send
-        ('grpc.max_receive_message_length', 4 * 1024 * 1024 * 1024),  # 4GB receive
+        ('grpc.max_send_message_length', -1),  # Unlimited send
+        ('grpc.max_receive_message_length', -1),  # Unlimited receive
         ('grpc.http2.max_frame_size', 16 * 1024 * 1024),  # 16MB frames
     ]
     
