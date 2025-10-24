@@ -201,7 +201,11 @@ def bytes_to_tensor(byte_data, dtype_str):
     mx_dtype_str = dtype_str.replace("mlx.core.", "")
     mx_dtype = getattr(mx, mx_dtype_str, mx.float32)
     
-    return mx.array(np_array, dtype=mx_dtype)
+    # Special handling for bfloat16: use .view() to reinterpret bits
+    if dtype_str == "mlx.core.bfloat16":
+        return mx.array(np_array).view(mx.bfloat16)
+    else:
+        return mx.array(np_array, dtype=mx_dtype)
 
 def create_generate_step_with_grpc(grpc_stubs: List):
     def generate_step(
@@ -385,7 +389,9 @@ def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
             logits = tensor[:, -1, :]
             logger.info(f"🎯 Extracted logits: shape={logits.shape}")
             logger.info(f"🔍 Logits stats: min={logits.min().item():.4f}, max={logits.max().item():.4f}, mean={logits.mean().item():.4f}, std={logits.std().item():.4f}")
+            logger.info(f"🔍 Has NaN: {mx.isnan(logits).any().item()}, Has Inf: {mx.isinf(logits).any().item()}")
             logger.info(f"🔍 Top 5 token IDs: {mx.argsort(logits[0])[-5:].tolist()}")
+            logger.info(f"🔍 Bottom 5 token IDs: {mx.argsort(logits[0])[:5].tolist()}")
             
             # Apply logits processors (repetition penalty, logit bias, etc.)
             for processor in logits_processors:
