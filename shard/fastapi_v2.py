@@ -75,6 +75,8 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = 2048
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
+    repetition_penalty: Optional[float] = 1.0
+    repetition_context_size: Optional[int] = 20
 
 
 class ModelInfo(BaseModel):
@@ -426,7 +428,13 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
     finish_reason = "length"
     
     for (token, _), _ in zip(
-        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+        model_provider.generate(
+            prompt, 
+            temperature=request.temperature, 
+            top_p=request.top_p,
+            repetition_penalty=request.repetition_penalty,
+            repetition_context_size=request.repetition_context_size
+        ),
         range(request.max_tokens)
     ):
         tokens.append(token)
@@ -537,7 +545,13 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
     
     try:
         for (token, _), _ in zip(
-            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            model_provider.generate(
+                prompt, 
+                temperature=request.temperature, 
+                top_p=request.top_p,
+                repetition_penalty=request.repetition_penalty,
+                repetition_context_size=request.repetition_context_size
+            ),
             range(request.max_tokens)
         ):
             detokenizer.add_token(token)
@@ -700,7 +714,13 @@ async def generate_completion(request: CompletionRequest, prompt: mx.array) -> D
     detokenizer.reset()
     
     for (token, _), _ in zip(
-        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+        model_provider.generate(
+            prompt, 
+            temperature=request.temperature, 
+            top_p=request.top_p,
+            repetition_penalty=request.repetition_penalty,
+            repetition_context_size=request.repetition_context_size
+        ),
         range(request.max_tokens)
     ):
         tokens.append(token)
@@ -743,7 +763,13 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
     
     try:
         for (token, _), _ in zip(
-            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            model_provider.generate(
+                prompt, 
+                temperature=request.temperature, 
+                top_p=request.top_p,
+                repetition_penalty=request.repetition_penalty,
+                repetition_context_size=request.repetition_context_size
+            ),
             range(request.max_tokens)
         ):
             detokenizer.add_token(token)
