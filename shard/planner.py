@@ -246,14 +246,13 @@ class ShardingPlanner:
             # So end_layer=68 means layers 0-67, end_layer=92 means layers 0-91
             # No need to subtract 1 - the exclusive range prevents overlap
             is_last_peer = (end_layer == self.total_layers)
-            end_layer_inclusive = end_layer
             
             shard = ShardAssignment(
                 peer_id=peer.id,
                 peer_address=peer.address,
                 grpc_address=grpc_address,
                 start_layer=current_layer,
-                end_layer=end_layer_inclusive,
+                end_layer=end_layer,  # Already exclusive, use directly
                 estimated_memory_gb=shard_memory,
                 has_embedding=(current_layer == 0),
                 has_lm_head=is_last_peer,
@@ -264,8 +263,8 @@ class ShardingPlanner:
             # Log the actual layers being loaded
             # Model code uses: start_layer <= i < end_layer (exclusive end)
             # So end_layer=68 means layers 0-67 are loaded
-            actual_last_layer = end_layer_inclusive - 1
-            num_layers_in_shard = actual_last_layer - current_layer + 1
+            actual_last_layer = end_layer - 1
+            num_layers_in_shard = end_layer - current_layer
             lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
             logger.info(f"Assigned layers {current_layer}-{actual_last_layer} ({num_layers_in_shard} layers) to peer {peer.id[:8]} "
                        f"({shard_memory:.1f}GB){lm_head_note}")

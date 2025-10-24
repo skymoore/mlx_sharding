@@ -125,23 +125,27 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             
             # Process the tensor (same for both paths)
             if MODEL is not None:
+                # Get this peer's global layer range
+                # Note: end_layer is already exclusive (e.g., 67 means layers 0-66)
+                start_layer = MODEL.start_layer
+                end_layer = MODEL.end_layer
+                num_layers = end_layer - start_layer
+                
                 # Load cache from Redis if session_id provided and Redis is available
                 cache_to_use = CACHE
                 if session_id and REDIS_CACHE is not None:
                     try:
-                        # Get this peer's global layer range
-                        start_layer = MODEL.start_layer
-                        end_layer = MODEL.end_layer + 1  # Exclusive
-                        
                         redis_cache = REDIS_CACHE.get_cache(session_id, start_layer, end_layer)
                         if redis_cache is not None:
-                            # Validate cache size matches expected layer count
-                            expected_layers = end_layer - start_layer
-                            if len(redis_cache) != expected_layers:
-                                print(f"⚠️  Cache size mismatch: got {len(redis_cache)}, expected {expected_layers}")
-                            else:
-                                cache_to_use = redis_cache
-                                print(f"📦 Loaded cache from Redis (layers {start_layer}-{end_layer-1})")
+                            # Redis cache is already the right size (only this peer's layers)
+                            # But CACHE is full-sized (all model layers)
+                            # We need to insert redis_cache into the correct positions in CACHE
+                            
+                            # Replace the relevant slice of CACHE with redis_cache
+                            for i, kv in enumerate(redis_cache):
+                                cache_to_use[start_layer + i] = kv
+                            
+                            print(f"📦 Loaded cache from Redis (layers {start_layer}-{end_layer-1})")
                         else:
                             print(f"📦 No cache in Redis (layers {start_layer}-{end_layer-1}), using local cache")
                     except Exception as e:
@@ -157,16 +161,12 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 # Save cache to Redis if session_id provided and Redis is available
                 if session_id and REDIS_CACHE is not None and cache_to_use is not None:
                     try:
-                        # Get this peer's global layer range
-                        start_layer = MODEL.start_layer
-                        end_layer = MODEL.end_layer + 1  # Exclusive
-                        expected_layers = end_layer - start_layer
+                        # Extract only the cache entries for layers this peer processes
+                        # cache_to_use is full-sized (92 layers), but we only want our slice
+                        peer_cache_slice = cache_to_use[start_layer:end_layer]
                         
-                        # Validate cache size before saving
-                        if len(cache_to_use) != expected_layers:
-                            print(f"⚠️  Cache size mismatch before save: got {len(cache_to_use)}, expected {expected_layers}")
-                        
-                        REDIS_CACHE.set_cache(session_id, cache_to_use, start_layer)
+                        print(f"💾 Saving cache slice: {len(peer_cache_slice)} layers (global {start_layer}-{end_layer-1})")
+                        REDIS_CACHE.set_cache(session_id, peer_cache_slice, start_layer)
                         print(f"💾 Saved cache to Redis (layers {start_layer}-{end_layer-1})")
                     except Exception as e:
                         print(f"⚠️  Failed to save cache to Redis: {e}")
