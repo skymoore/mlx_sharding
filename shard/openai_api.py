@@ -238,7 +238,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.max_tokens = self.body.get("max_tokens", 100)
         self.temperature = self.body.get("temperature", 1.0)
         self.top_p = self.body.get("top_p", 1.0)
-        self.repetition_penalty = self.body.get("repetition_penalty", 1.0)
+        self.repetition_penalty = self.body.get("repetition_penalty", 1.1)
         self.repetition_context_size = self.body.get(
             "repetition_context_size", 20)
         self.logit_bias = self.body.get("logit_bias", None)

@@ -15,7 +15,8 @@ os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
 
 import mlx.core as mx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -81,6 +82,61 @@ class OpenWebUIModelList(BaseModel):
 # Global state
 app = FastAPI(title="MLX Sharding OpenAI API", version="1.0.0")
 model_provider = None
+api_keys: set[str] = set()  # Store valid API keys
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+
+def load_api_keys() -> set[str]:
+    """Load API keys from environment variable or file."""
+    keys = set()
+    
+    # Load from environment variable (comma-separated)
+    env_keys = os.environ.get("MLX_API_KEYS", "")
+    if env_keys:
+        keys.update(k.strip() for k in env_keys.split(",") if k.strip())
+    
+    # Load from file (one key per line)
+    api_key_file = os.environ.get("MLX_API_KEY_FILE", ".api_keys")
+    if os.path.exists(api_key_file):
+        with open(api_key_file, "r") as f:
+            keys.update(line.strip() for line in f if line.strip() and not line.startswith("#"))
+    
+    return keys
+
+
+async def verify_api_key(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> bool:
+    """Verify API key from Authorization header."""
+    # Skip authentication for health check
+    if request.url.path == "/health":
+        return True
+    
+    # If no API keys configured, allow all requests
+    if not api_keys:
+        logging.warning("No API keys configured - authentication disabled")
+        return True
+    
+    # Check for valid credentials
+    if not credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Verify the API key
+    if credentials.credentials not in api_keys:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return True
 
 
 # CORS middleware
@@ -155,7 +211,10 @@ async def health_check():
 
 
 @app.get("/v1/models")
-async def list_models() -> ModelList:
+async def list_models(
+    request: Request,
+    authenticated: bool = Security(verify_api_key)
+) -> ModelList:
     """List available models (OpenAI format)."""
     return ModelList(
         data=[
@@ -168,7 +227,10 @@ async def list_models() -> ModelList:
 
 
 @app.get("/api/models")
-async def list_models_openwebui() -> OpenWebUIModelList:
+async def list_models_openwebui(
+    request: Request,
+    authenticated: bool = Security(verify_api_key)
+) -> OpenWebUIModelList:
     """List available models (Open WebUI format)."""
     return OpenWebUIModelList(
         models=[
@@ -181,7 +243,11 @@ async def list_models_openwebui() -> OpenWebUIModelList:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(
+    request: ChatCompletionRequest,
+    http_request: Request,
+    authenticated: bool = Security(verify_api_key)
+):
     """Handle chat completion requests with tool calling support."""
     import json
     
@@ -241,7 +307,11 @@ async def chat_completions(request: ChatCompletionRequest):
 
 
 @app.post("/v1/completions")
-async def completions(request: CompletionRequest):
+async def completions(
+    request: CompletionRequest,
+    http_request: Request,
+    authenticated: bool = Security(verify_api_key)
+):
     """Handle text completion requests."""
     try:
         prompt = model_provider.tokenizer.encode(request.prompt)
@@ -696,6 +766,15 @@ def main():
                 stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
                 grpc_stubs.append(stub)
                 logging.info(f"Connected to remote shard: {addr}")
+    
+    # Load API keys
+    global api_keys
+    api_keys = load_api_keys()
+    if api_keys:
+        logging.info(f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)")
+    else:
+        logging.warning("⚠ No API keys configured - authentication disabled!")
+        logging.warning("  Set MLX_API_KEYS environment variable or create .api_keys file")
     
     # Initialize model provider
     global model_provider
