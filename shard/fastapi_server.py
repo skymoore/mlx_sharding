@@ -26,6 +26,10 @@ from .grpc import mlx_tensor_pb2_grpc
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import hf_repo_to_path
 from .utils import create_generate_step_with_grpc, load_model
+from .tool_calling import (
+    ToolDefinition, ToolCall, ToolCallManager,
+    create_tool_call_manager
+)
 
 
 # Pydantic models for OpenAI API compatibility
@@ -44,6 +48,8 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     repetition_penalty: Optional[float] = 1.0
     repetition_context_size: Optional[int] = 20
+    tools: Optional[List[ToolDefinition]] = None  # Tool calling support
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None  # "auto", "none", or specific tool
 
 
 class CompletionRequest(BaseModel):
@@ -111,7 +117,11 @@ class MLXModelProvider:
         self.model_name = Path(model_path).name if Path(model_path).exists() else model_path
         self.created = int(time.time())
         
+        # Initialize tool call manager
+        model_type = getattr(self.model, 'model_type', 'unknown')
+        self.tool_manager = create_tool_call_manager(model_type)
         logging.info(f"Model loaded: {self.model_name}")
+        logging.info(f"Tool calling enabled with {self.tool_manager.parser.__class__.__name__}")
     
     def get_default_stop_sequences(self) -> List[str]:
         """Get model-specific default stop sequences."""
@@ -172,11 +182,23 @@ async def list_models_openwebui() -> OpenWebUIModelList:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    """Handle chat completion requests."""
+    """Handle chat completion requests with tool calling support."""
     try:
+        # Prepare messages
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        
+        # Add tool descriptions to system message if tools provided
+        if request.tools:
+            tool_prompt = model_provider.tool_manager.format_tools_for_prompt(request.tools)
+            # Find or create system message
+            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), None)
+            if system_msg_idx is not None:
+                messages[system_msg_idx]["content"] += tool_prompt
+            else:
+                messages.insert(0, {"role": "system", "content": f"You are a helpful assistant.{tool_prompt}"})
+        
         # Apply chat template
         if hasattr(model_provider.tokenizer, "apply_chat_template"):
-            messages = [{"role": m.role, "content": m.content} for m in request.messages]
             prompt = model_provider.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
@@ -184,7 +206,7 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         else:
             # Fallback: simple concatenation
-            prompt_text = "\n".join([f"{m.role}: {m.content}" for m in request.messages])
+            prompt_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
             prompt = model_provider.tokenizer.encode(prompt_text)
         
         prompt_array = mx.array(prompt)
@@ -277,7 +299,14 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
     # Final check and trim stop sequences
     _, text = check_stop_sequences(text, stop_sequences)
     
-    return {
+    # Parse tool calls if tools were provided
+    cleaned_content = text
+    tool_calls = []
+    if request.tools:
+        cleaned_content, tool_calls = model_provider.tool_manager.parse(text)
+    
+    # Build response
+    response = {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -287,7 +316,7 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": text,
+                    "content": cleaned_content,
                 },
                 "finish_reason": finish_reason,
             }
@@ -298,16 +327,37 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
             "total_tokens": len(prompt) + len(tokens),
         },
     }
+    
+    # Add tool_calls if any were found
+    if tool_calls:
+        response["choices"][0]["message"]["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": tc.function
+            }
+            for tc in tool_calls
+        ]
+        # When tool calls present, finish_reason should be "tool_calls"
+        response["choices"][0]["finish_reason"] = "tool_calls"
+    
+    return response
 
 
 async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.array):
-    """Generate streaming chat completion."""
+    """Generate streaming chat completion with tool call support."""
     import json
     import asyncio
     
     request_id = f"chatcmpl-{uuid.uuid4()}"
+    created = int(time.time())
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
+    
+    # Create streaming parser if tools provided
+    streaming_parser = None
+    if request.tools:
+        streaming_parser = model_provider.tool_manager.create_streaming_parser()
     
     # Prepare stop sequences
     stop_sequences = []
@@ -337,8 +387,6 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
             if stop_found:
                 finish_reason = "stop"
-                # Calculate what part of the trimmed text we haven't sent yet
-                # This is tricky with streaming, so we just stop here
                 break
             
             # Get the segment to send
@@ -348,35 +396,111 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             if text:
                 segment_stop_found, trimmed_segment = check_stop_sequences(text, stop_sequences)
                 if segment_stop_found:
-                    # Send only the part before the stop sequence
-                    if trimmed_segment:
+                    finish_reason = "stop"
+                    text = trimmed_segment
+                
+                # Parse for tool calls if enabled
+                if streaming_parser and text:
+                    content_to_emit, new_tool_calls = streaming_parser.add_chunk(text)
+                    
+                    # Emit content chunk if any
+                    if content_to_emit:
                         chunk = {
                             "id": request_id,
                             "object": "chat.completion.chunk",
-                            "created": int(time.time()),
+                            "created": created,
                             "model": request.model,
-                            "choices": [{"index": 0, "delta": {"content": trimmed_segment}, "finish_reason": None}],
+                            "choices": [{"index": 0, "delta": {"content": content_to_emit}, "finish_reason": None}],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
-                    finish_reason = "stop"
-                    break
+                    
+                    # Emit tool call chunks if any
+                    for tool_call in new_tool_calls:
+                        chunk = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": 0,
+                                        "id": tool_call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_call.function["name"],
+                                            "arguments": tool_call.function["arguments"]
+                                        }
+                                    }]
+                                },
+                                "finish_reason": None
+                            }],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                elif text:
+                    # No tool parsing, send text directly
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
                 
-                # Send the full segment
+                await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
+                
+                if segment_stop_found:
+                    break
+        
+        # Finalize - get any remaining content
+        if streaming_parser:
+            remaining_content, remaining_tool_calls = streaming_parser.finalize()
+            
+            if remaining_content:
                 chunk = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
-                    "created": int(time.time()),
+                    "created": created,
                     "model": request.model,
-                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-                await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
+            
+            for tool_call in remaining_tool_calls:
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function["name"],
+                                    "arguments": tool_call.function["arguments"]
+                                }
+                            }]
+                        },
+                        "finish_reason": None
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # Update finish_reason if tool calls were emitted
+            if streaming_parser.emitted_tool_calls:
+                finish_reason = "tool_calls"
         
         # Send final chunk
         final_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": created,
             "model": request.model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
         }
@@ -395,7 +519,7 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             error_chunk = {
                 "id": request_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created,
                 "model": request.model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
             }
