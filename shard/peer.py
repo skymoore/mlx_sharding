@@ -313,7 +313,9 @@ class PeerServer:
                     estimated_memory_gb=estimated_memory_gb
                 )
                 
-                logger.info(f"Loading model: {model_name} layers {start_layer}-{end_layer}")
+                # end_layer is exclusive, so actual last layer is end_layer-1
+                actual_end_layer = end_layer - 1
+                logger.info(f"Loading model: {model_name} layers {start_layer}-{actual_end_layer} (inclusive)")
                 
                 # Determine model path - use local path if set (for localhost peers), otherwise use cache
                 if self.local_model_path:

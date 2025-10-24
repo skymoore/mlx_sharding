@@ -225,6 +225,9 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
     server.start()
     print(f"Server started, listening on 0.0.0.0:{port}")
     if start_layer is not None or end_layer is not None:
-        print(f"Model loaded with layers {start_layer or 0} to {end_layer or 'end'}")
+        # end_layer is exclusive, so actual last layer is end_layer-1
+        actual_start = start_layer or 0
+        actual_end = (end_layer - 1) if end_layer else 'end'
+        print(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
     server.wait_for_termination()
 

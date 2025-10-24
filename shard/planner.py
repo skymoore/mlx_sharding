@@ -242,15 +242,11 @@ class ShardingPlanner:
             # TODO: Integrate network path selection
             grpc_address = f"{peer.host}:{peer.grpc_port}"
             
-            # Model loading treats end_layer as inclusive for intermediate layers,
-            # but the LAST peer needs end_layer == total_layers to get the LM head
+            # Model loading treats end_layer as EXCLUSIVE (like Python range)
+            # So end_layer=68 means layers 0-67, end_layer=92 means layers 0-91
+            # No need to subtract 1 - the exclusive range prevents overlap
             is_last_peer = (end_layer == self.total_layers)
-            if is_last_peer:
-                # Last peer: keep end_layer == total_layers for LM head
-                end_layer_inclusive = end_layer
-            else:
-                # Intermediate peer: subtract 1 to avoid overlap
-                end_layer_inclusive = end_layer - 1
+            end_layer_inclusive = end_layer
             
             shard = ShardAssignment(
                 peer_id=peer.id,
@@ -265,8 +261,10 @@ class ShardingPlanner:
             
             shards.append(shard)
             
+            # Log the actual layers being loaded (end_layer is exclusive, so last layer is end_layer-1)
+            actual_last_layer = end_layer_inclusive - 1
             lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
-            logger.info(f"Assigned layers {current_layer}-{end_layer_inclusive} to peer {peer.id[:8]} "
+            logger.info(f"Assigned layers {current_layer}-{actual_last_layer} (inclusive) to peer {peer.id[:8]} "
                        f"({shard_memory:.1f}GB){lm_head_note}")
             
             current_layer = end_layer

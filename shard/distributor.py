@@ -6,6 +6,7 @@ Handles transferring model files to peers with chunking, caching, and verificati
 import asyncio
 import aiohttp
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Callable, Optional
@@ -309,7 +310,7 @@ class ModelFileDistributor:
     
     def _compute_file_hash(self, file_path: Path) -> str:
         """
-        Compute SHA256 hash of a file.
+        Compute SHA256 hash of a file, with caching.
         
         Args:
             file_path: Path to file
@@ -317,11 +318,49 @@ class ModelFileDistributor:
         Returns:
             Hex digest of hash
         """
+        # Try to load from cache first
+        hash_cache_file = self.model_path / ".coordinator_hashes.json"
+        if hash_cache_file.exists():
+            try:
+                with open(hash_cache_file, 'r') as f:
+                    hash_cache = json.load(f)
+                    if file_path.name in hash_cache:
+                        # Verify file hasn't changed by checking size and mtime
+                        cached_entry = hash_cache[file_path.name]
+                        current_stat = file_path.stat()
+                        if (cached_entry.get('size') == current_stat.st_size and
+                            cached_entry.get('mtime') == current_stat.st_mtime):
+                            return cached_entry['hash']
+            except Exception as e:
+                logger.debug(f"Failed to load hash cache: {e}")
+        
+        # Compute hash
         hasher = hashlib.sha256()
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(8192), b""):
                 hasher.update(chunk)
-        return hasher.hexdigest()
+        file_hash = hasher.hexdigest()
+        
+        # Save to cache
+        try:
+            hash_cache = {}
+            if hash_cache_file.exists():
+                with open(hash_cache_file, 'r') as f:
+                    hash_cache = json.load(f)
+            
+            file_stat = file_path.stat()
+            hash_cache[file_path.name] = {
+                'hash': file_hash,
+                'size': file_stat.st_size,
+                'mtime': file_stat.st_mtime
+            }
+            
+            with open(hash_cache_file, 'w') as f:
+                json.dump(hash_cache, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Failed to save hash cache: {e}")
+        
+        return file_hash
     
     def _is_localhost(self, host: str) -> bool:
         """
