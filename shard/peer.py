@@ -1,0 +1,382 @@
+"""
+MLX Shard Peer Server - V2 Zero-Configuration Worker Node
+
+This is a lightweight worker node that:
+- Announces itself on the network
+- Receives model files from coordinator
+- Loads assigned model layers
+- Executes inference via gRPC
+"""
+
+import argparse
+import asyncio
+import logging
+import threading
+import signal
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import JSONResponse
+import uvicorn
+
+from .discovery import PeerDiscovery
+from .capabilities import SystemCapabilities
+from .server.server import serve as grpc_serve
+from .utils import load_model
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ShardAssignment:
+    """Assignment of model layers to this peer."""
+    model_name: str
+    start_layer: int
+    end_layer: int
+    estimated_memory_gb: float
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> "ShardAssignment":
+        return cls(**data)
+    
+    def to_dict(self) -> Dict:
+        return {
+            "model_name": self.model_name,
+            "start_layer": self.start_layer,
+            "end_layer": self.end_layer,
+            "estimated_memory_gb": self.estimated_memory_gb,
+        }
+
+
+class PeerServer:
+    """HTTP server for peer control and file reception."""
+    
+    def __init__(self, grpc_port: int = 50051, http_port: int = 8081, 
+                 cache_dir: str = "~/.cache/mlx-sharding"):
+        self.app = FastAPI(title="MLX Shard Peer", version="2.0.0")
+        self.grpc_port = grpc_port
+        self.http_port = http_port
+        self.cache_dir = Path(cache_dir).expanduser()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # State
+        self.discovery = PeerDiscovery(role="peer")
+        self.capabilities = SystemCapabilities.get_capabilities()
+        self.state = "idle"  # idle, receiving_files, loading_model, ready, error
+        self.model = None
+        self.assignment: Optional[ShardAssignment] = None
+        self.coordinator_id: Optional[str] = None
+        self.file_buffers: Dict[str, Dict] = {}  # For chunked file reception
+        
+        # gRPC server thread
+        self.grpc_thread: Optional[threading.Thread] = None
+        
+        self._setup_routes()
+        
+        logger.info(f"Peer server initialized (gRPC={grpc_port}, HTTP={http_port})")
+        logger.info(f"Cache directory: {self.cache_dir}")
+        logger.info(f"Capabilities: {self.capabilities['ram_available_gb']:.1f}GB RAM, "
+                   f"{self.capabilities['cpu_cores']} cores")
+    
+    def _setup_routes(self):
+        """Setup HTTP API routes."""
+        
+        @self.app.get("/health")
+        async def health_check():
+            """Health check endpoint."""
+            return {"status": "ok", "state": self.state}
+        
+        @self.app.get("/api/status")
+        async def get_status():
+            """Return current peer status."""
+            return {
+                "state": self.state,
+                "capabilities": self.capabilities,
+                "model_loaded": self.model is not None,
+                "assignment": self.assignment.to_dict() if self.assignment else None,
+                "coordinator_id": self.coordinator_id,
+            }
+        
+        @self.app.post("/api/claim")
+        async def claim_peer(coordinator_id: str):
+            """Claim this peer for a coordinator."""
+            if self.coordinator_id and self.coordinator_id != coordinator_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Already claimed by coordinator {self.coordinator_id}"
+                )
+            
+            self.coordinator_id = coordinator_id
+            logger.info(f"Claimed by coordinator {coordinator_id[:8]}")
+            
+            return {"success": True, "message": "Peer claimed"}
+        
+        @self.app.post("/api/receive_file_chunk")
+        async def receive_file_chunk(
+            model_name: str = Form(...),
+            file_name: str = Form(...),
+            chunk_num: int = Form(...),
+            total_chunks: int = Form(...),
+            chunk_data: bytes = File(...)
+        ):
+            """Receive a file chunk."""
+            try:
+                self.state = "receiving_files"
+                
+                # Create model cache directory
+                model_cache = self.cache_dir / model_name
+                model_cache.mkdir(parents=True, exist_ok=True)
+                
+                # Initialize buffer for this file
+                file_key = f"{model_name}/{file_name}"
+                if file_key not in self.file_buffers:
+                    self.file_buffers[file_key] = {
+                        "chunks": {},
+                        "total_chunks": total_chunks,
+                        "file_path": model_cache / file_name,
+                    }
+                
+                # Store chunk
+                self.file_buffers[file_key]["chunks"][chunk_num] = chunk_data
+                
+                logger.debug(f"Received chunk {chunk_num+1}/{total_chunks} for {file_name}")
+                
+                # Check if all chunks received
+                if len(self.file_buffers[file_key]["chunks"]) == total_chunks:
+                    # Reassemble file
+                    file_path = self.file_buffers[file_key]["file_path"]
+                    with open(file_path, "wb") as f:
+                        for i in range(total_chunks):
+                            f.write(self.file_buffers[file_key]["chunks"][i])
+                    
+                    # Clean up buffer
+                    del self.file_buffers[file_key]
+                    
+                    logger.info(f"✓ File complete: {file_name}")
+                    
+                    return {
+                        "success": True,
+                        "message": f"File {file_name} complete",
+                        "complete": True
+                    }
+                
+                return {
+                    "success": True,
+                    "message": f"Chunk {chunk_num+1}/{total_chunks} received",
+                    "complete": False
+                }
+            
+            except Exception as e:
+                logger.error(f"Error receiving file chunk: {e}", exc_info=True)
+                self.state = "error"
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.get("/api/cache/check")
+        async def check_cache(model: str):
+            """Check which files are already cached."""
+            import hashlib
+            
+            model_cache = self.cache_dir / model
+            if not model_cache.exists():
+                return {}
+            
+            hashes = {}
+            for file_path in model_cache.glob("*"):
+                if file_path.is_file():
+                    # Compute hash
+                    hasher = hashlib.sha256()
+                    with open(file_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(8192), b""):
+                            hasher.update(chunk)
+                    hashes[file_path.name] = hasher.hexdigest()
+            
+            logger.info(f"Cache check for {model}: {len(hashes)} files cached")
+            return hashes
+        
+        @self.app.post("/api/load_model")
+        async def load_model_endpoint(
+            model_name: str = Form(...),
+            start_layer: int = Form(...),
+            end_layer: int = Form(...),
+            estimated_memory_gb: float = Form(...),
+            coordinator_id: str = Form(...)
+        ):
+            """Load assigned model layers."""
+            try:
+                # Verify coordinator
+                if self.coordinator_id != coordinator_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Not claimed by coordinator {coordinator_id}"
+                    )
+                
+                self.state = "loading_model"
+                
+                # Create assignment
+                self.assignment = ShardAssignment(
+                    model_name=model_name,
+                    start_layer=start_layer,
+                    end_layer=end_layer,
+                    estimated_memory_gb=estimated_memory_gb
+                )
+                
+                logger.info(f"Loading model: {model_name} layers {start_layer}-{end_layer}")
+                
+                # Load model from cache
+                model_path = self.cache_dir / model_name
+                if not model_path.exists():
+                    raise FileNotFoundError(f"Model not found in cache: {model_path}")
+                
+                self.model = load_model(
+                    str(model_path),
+                    start_layer=start_layer,
+                    end_layer=end_layer
+                )
+                
+                self.state = "ready"
+                
+                # Update discovery status
+                self.discovery.update_status(
+                    "ready",
+                    model_loaded=model_name,
+                    layers_loaded=f"{start_layer}-{end_layer}"
+                )
+                
+                logger.info(f"✓ Model loaded successfully")
+                
+                return {
+                    "success": True,
+                    "message": "Model loaded",
+                    "assignment": self.assignment.to_dict()
+                }
+            
+            except Exception as e:
+                logger.error(f"Error loading model: {e}", exc_info=True)
+                self.state = "error"
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.post("/api/unload_model")
+        async def unload_model():
+            """Unload current model."""
+            self.model = None
+            self.assignment = None
+            self.coordinator_id = None
+            self.state = "idle"
+            
+            self.discovery.update_status("idle", model_loaded="", layers_loaded="")
+            
+            logger.info("Model unloaded")
+            return {"success": True, "message": "Model unloaded"}
+    
+    def start_grpc_server(self):
+        """Start gRPC server in background thread."""
+        def run_grpc():
+            # Note: grpc_serve expects model to be loaded already
+            # We'll need to modify it to work with dynamic model loading
+            grpc_serve(None, None, None, self.grpc_port)
+        
+        self.grpc_thread = threading.Thread(target=run_grpc, daemon=True)
+        self.grpc_thread.start()
+        logger.info(f"✓ gRPC server started on port {self.grpc_port}")
+    
+    def start(self):
+        """Start peer server."""
+        # Start gRPC server
+        self.start_grpc_server()
+        
+        # Announce on network
+        self.discovery.announce(self.grpc_port, self.http_port, self.capabilities)
+        logger.info(f"✓ Announced on network")
+        
+        # Start HTTP server
+        logger.info(f"🚀 Peer server starting on 0.0.0.0:{self.http_port}")
+        logger.info(f"   State: {self.state}")
+        logger.info(f"   Ready to receive assignments")
+        
+        uvicorn.run(
+            self.app,
+            host="0.0.0.0",
+            port=self.http_port,
+            log_level="info"
+        )
+    
+    def stop(self):
+        """Stop peer server."""
+        logger.info("Stopping peer server...")
+        self.discovery.stop()
+        logger.info("✓ Peer server stopped")
+
+
+def main():
+    """Main entry point for peer server."""
+    parser = argparse.ArgumentParser(
+        description="MLX Shard Peer - Zero-configuration worker node"
+    )
+    parser.add_argument(
+        "--grpc-port",
+        type=int,
+        default=50051,
+        help="gRPC server port (default: 50051)"
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=8081,
+        help="HTTP control server port (default: 8081)"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default="~/.cache/mlx-sharding",
+        help="Cache directory for model files"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level"
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    # Create and start server
+    server = PeerServer(
+        grpc_port=args.grpc_port,
+        http_port=args.http_port,
+        cache_dir=args.cache_dir
+    )
+    
+    # Setup signal handlers
+    def signal_handler(sig, frame):
+        logger.info("\nReceived shutdown signal")
+        server.stop()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Start server
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        logger.info("\nShutting down...")
+        server.stop()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
