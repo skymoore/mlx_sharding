@@ -125,54 +125,16 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             
             # Process the tensor (same for both paths)
             if MODEL is not None:
-                # Get this peer's global layer range
-                # Note: end_layer is already exclusive (e.g., 67 means layers 0-66)
-                start_layer = MODEL.start_layer
-                end_layer = MODEL.end_layer
-                num_layers = end_layer - start_layer
-                
-                # Load cache from Redis if session_id provided and Redis is available
+                # Pipeline parallelism: Each peer maintains its OWN cache in memory
+                # The cache persists across tokens within a generation
+                # ResetCache RPC clears it between generations
+                # NO cache synchronization needed - each peer's cache is independent
                 cache_to_use = CACHE
-                if session_id and REDIS_CACHE is not None:
-                    try:
-                        redis_cache = REDIS_CACHE.get_cache(session_id, start_layer, end_layer)
-                        if redis_cache is not None:
-                            # CRITICAL: Redis cache contains ONLY this peer's layers
-                            # CACHE is full-sized (92 layers), but only layers [start_layer:end_layer] are used
-                            # We must replace ONLY the used portion of CACHE
-                            
-                            # The model only uses cache[start_layer:end_layer] during forward pass
-                            # So we replace that slice with the Redis cache
-                            for i, kv in enumerate(redis_cache):
-                                cache_to_use[start_layer + i] = kv
-                            
-                            print(f"📦 Loaded cache from Redis (layers {start_layer}-{end_layer-1})")
-                        else:
-                            print(f"📦 No cache in Redis (layers {start_layer}-{end_layer-1}), using local cache")
-                    except Exception as e:
-                        print(f"⚠️  Failed to load cache from Redis: {e}, using local cache")
-                        import traceback
-                        traceback.print_exc()
                 
                 process_start = time.time()
                 processed_tensor = MODEL(tensor, cache=cache_to_use)
                 process_time = time.time() - process_start
                 print(f"⚙️  Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
-                
-                # Save cache to Redis if session_id provided and Redis is available
-                if session_id and REDIS_CACHE is not None and cache_to_use is not None:
-                    try:
-                        # Extract only the cache entries for layers this peer processes
-                        # cache_to_use is full-sized (92 layers), but we only want our slice
-                        peer_cache_slice = cache_to_use[start_layer:end_layer]
-                        
-                        print(f"💾 Saving cache slice: {len(peer_cache_slice)} layers (global {start_layer}-{end_layer-1})")
-                        REDIS_CACHE.set_cache(session_id, peer_cache_slice, start_layer)
-                        print(f"💾 Saved cache to Redis (layers {start_layer}-{end_layer-1})")
-                    except Exception as e:
-                        print(f"⚠️  Failed to save cache to Redis: {e}")
-                        import traceback
-                        traceback.print_exc()
                 
                 # Only reduce to last token if this is the last peer (has lm_head)
                 # Intermediate peers need to pass full sequence for KV cache building
