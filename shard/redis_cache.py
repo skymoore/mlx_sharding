@@ -62,21 +62,29 @@ class RedisKVCache:
         Serialize KV cache to bytes using msgpack.
         
         Args:
-            cache: Either a tuple of (keys, values) or a KVCache object with .state property
+            cache: Either a tuple of (keys, values) or a KVCache object with keys/values attributes
             
         Returns:
             Serialized bytes
         """
         # Handle KVCache objects (from mlx_lm.models.cache)
-        if hasattr(cache, 'state'):
-            logger.debug(f"Serializing KVCache object with state property")
-            keys, values = cache.state
+        # Check if it has keys/values attributes (not None)
+        if hasattr(cache, 'keys') and hasattr(cache, 'values'):
+            keys = cache.keys
+            values = cache.values
+            
+            # Skip empty caches (keys/values are None)
+            if keys is None or values is None:
+                logger.debug(f"Skipping empty KVCache (keys={keys}, values={values})")
+                return msgpack.packb({"empty": True}, use_bin_type=True)
+            
+            logger.debug(f"Serializing KVCache object with keys/values")
         # Handle raw tuples
         elif isinstance(cache, tuple) and len(cache) == 2:
             logger.debug(f"Serializing raw tuple cache")
             keys, values = cache
         else:
-            error_msg = f"Unsupported cache type: {type(cache)}, has_state={hasattr(cache, 'state')}, is_tuple={isinstance(cache, tuple)}"
+            error_msg = f"Unsupported cache type: {type(cache)}, has_keys={hasattr(cache, 'keys')}, has_values={hasattr(cache, 'values')}, is_tuple={isinstance(cache, tuple)}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         
@@ -102,10 +110,15 @@ class RedisKVCache:
             data: Serialized cache bytes
             
         Returns:
-            Tuple of (keys, values) as mx.array
+            Tuple of (keys, values) as mx.array, or None if cache was empty
         """
         import numpy as np
         unpacked = msgpack.unpackb(data, raw=False)
+        
+        # Handle empty cache marker
+        if unpacked.get("empty"):
+            logger.debug("Deserializing empty cache marker")
+            return None
         
         keys_data = unpacked["keys"]
         # Convert bytes to numpy array first, then to MLX array
@@ -175,10 +188,16 @@ class RedisKVCache:
             cache = []
             for layer_idx, data in enumerate(results):
                 if data is not None:
-                    keys, values = self._deserialize_cache(data)
-                    # Create KVCache object and set its state
+                    deserialized = self._deserialize_cache(data)
+                    # Create KVCache object
                     kv_cache = KVCache()
-                    kv_cache.state = (keys, values)
+                    
+                    # Only set state if cache had data (not empty marker)
+                    if deserialized is not None:
+                        keys, values = deserialized
+                        kv_cache.state = (keys, values)
+                    # else: leave as empty KVCache
+                    
                     cache.append(kv_cache)
                 else:
                     # Missing layer cache - create empty KVCache
