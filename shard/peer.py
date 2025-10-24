@@ -91,6 +91,26 @@ class PeerServer:
         logger.info(f"Cache directory: {self.cache_dir}")
         logger.info(f"Capabilities: {self.capabilities['ram_available_gb']:.1f}GB RAM, "
                    f"{self.capabilities['cpu_cores']} cores")
+        
+        # Test Redis connection if URL provided
+        if redis_url:
+            try:
+                from .redis_cache import RedisKVCache
+                logger.info(f"🔌 Testing Redis connection at {redis_url}...")
+                test_cache = RedisKVCache(redis_url=redis_url)
+                # Test read/write
+                test_key = "mlx:test:connection"
+                test_cache.client.set(test_key, "test", ex=5)
+                test_value = test_cache.client.get(test_key)
+                test_cache.client.delete(test_key)
+                test_cache.close()
+                logger.info(f"✅ Redis connection verified: {redis_url}")
+                logger.info(f"✅ Redis will be used for distributed cache synchronization")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to connect to Redis at {redis_url}: {e}")
+                logger.warning(f"⚠️  Peer will continue without Redis cache")
+        else:
+            logger.info(f"ℹ️  No Redis URL provided, will use local cache only")
     
     def _setup_routes(self):
         """Setup HTTP API routes."""
