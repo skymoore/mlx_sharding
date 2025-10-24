@@ -218,10 +218,31 @@ class MLXModelProvider:
         if model_type == 'qwen3_moe' or model_type.startswith('qwen'):
             return ["<|im_end|>", "<|endoftext|>"]
         elif model_type == 'glm4_moe' or model_type.startswith('glm'):
-            return ["<|user|>", "<|endoftext|>", "<|observation|>"]
+            return ["<|user|>", "<|endoftext|>", "<|observation|>", "<|assistant|>"]
         else:
             # Generic stop sequences
             return ["<|endoftext|>"]
+    
+    def get_stop_token_ids(self) -> List[int]:
+        """Get token IDs for stop sequences to check during generation."""
+        stop_sequences = self.get_default_stop_sequences()
+        stop_token_ids = []
+        
+        for seq in stop_sequences:
+            try:
+                # Encode the stop sequence to get its token ID(s)
+                tokens = self.tokenizer.encode(seq)
+                # If it's a single token, add it to our list
+                if len(tokens) == 1:
+                    stop_token_ids.append(tokens[0])
+            except:
+                pass
+        
+        # Always include EOS token
+        if self.tokenizer.eos_token_id is not None:
+            stop_token_ids.append(self.tokenizer.eos_token_id)
+        
+        return stop_token_ids
     
     def generate(self, prompt: mx.array, **kwargs):
         """Generate tokens using the distributed model."""
@@ -425,6 +446,9 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
     # Add model-specific default stop sequences
     stop_sequences.extend(model_provider.get_default_stop_sequences())
     
+    # Get stop token IDs for faster checking
+    stop_token_ids = model_provider.get_stop_token_ids()
+    
     finish_reason = "length"
     
     for (token, _), _ in zip(
@@ -440,12 +464,12 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
         tokens.append(token)
         detokenizer.add_token(token)
         
-        # Check for EOS token
-        if token == model_provider.tokenizer.eos_token_id:
+        # Check for stop tokens by ID (faster and more reliable)
+        if token in stop_token_ids:
             finish_reason = "stop"
             break
         
-        # Check for stop sequences in generated text
+        # Also check for stop sequences in generated text (for multi-token stops)
         current_text = detokenizer.text
         stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
         if stop_found:
@@ -541,6 +565,9 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             stop_sequences = request.stop
     stop_sequences.extend(model_provider.get_default_stop_sequences())
     
+    # Get stop token IDs for faster checking
+    stop_token_ids = model_provider.get_stop_token_ids()
+    
     finish_reason = "length"
     
     try:
@@ -556,12 +583,12 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
         ):
             detokenizer.add_token(token)
             
-            # Check for EOS
-            if token == model_provider.tokenizer.eos_token_id:
+            # Check for stop tokens by ID (faster and more reliable)
+            if token in stop_token_ids:
                 finish_reason = "stop"
                 break
             
-            # Check for stop sequences in full text
+            # Also check for stop sequences in full text (for multi-token stops)
             current_text = detokenizer.text
             stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
             if stop_found:
