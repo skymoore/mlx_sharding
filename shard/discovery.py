@@ -61,15 +61,17 @@ class PeerDiscovery:
     - UDP broadcast as fallback for networks where mDNS is blocked
     """
     
-    def __init__(self, role: str = "peer"):
+    def __init__(self, role: str = "peer", bind_ip: Optional[str] = None):
         """
         Initialize discovery service.
         
         Args:
             role: Role of this node ("peer" or "coordinator")
+            bind_ip: Specific IP address to bind to (optional)
         """
         self.role = role
         self.peer_id = str(uuid.uuid4())
+        self.bind_ip = bind_ip
         self.peers: Dict[str, PeerInfo] = {}
         self.peers_lock = threading.Lock()
         
@@ -88,6 +90,8 @@ class PeerDiscovery:
         self.on_peer_lost: Optional[Callable[[str], None]] = None
         
         logger.info(f"Initialized discovery service (role={role}, id={self.peer_id[:8]})")
+        if bind_ip:
+            logger.info(f"Will bind to IP: {bind_ip}")
     
     def announce(self, grpc_port: int, http_port: int, capabilities: Dict):
         """
@@ -189,9 +193,13 @@ class PeerDiscovery:
         try:
             self.zeroconf = Zeroconf()
             
-            # Get local IP
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
+            # Get local IP (use bind_ip if specified)
+            if self.bind_ip:
+                local_ip = self.bind_ip
+                logger.info(f"Using specified bind IP: {local_ip}")
+            else:
+                hostname = socket.gethostname()
+                local_ip = socket.gethostbyname(hostname)
             
             # Create service info
             properties = {

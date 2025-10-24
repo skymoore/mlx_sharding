@@ -39,7 +39,7 @@ from .tool_calling import (
     ToolDefinition, ToolCall, ToolCallManager,
     create_tool_call_manager
 )
-from .orchestrator import Orchestrator
+from .orchestrator import APIServerOrchestrator as Orchestrator
 from .discovery import PeerDiscovery
 
 # Setup logging
@@ -761,61 +761,48 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
             pass
 
 
-async def run_orchestrator_setup(model_path: str, local_layers: bool, 
-                                 grpc_port: int, http_port: int) -> Dict[str, Any]:
-    """Run the orchestrator setup process."""
+async def run_orchestrator_setup(model_path: str) -> Dict[str, Any]:
+    """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider
     
     logger.info("=" * 80)
-    logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP")
+    logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP (COORDINATOR-ONLY)")
+    logger.info("=" * 80)
+    logger.info("Note: API server does NOT load model layers")
+    logger.info("      Start peer processes separately with: mlx-shard-peer")
     logger.info("=" * 80)
     
-    # Create orchestrator
+    # Create orchestrator (coordinator-only mode - no local layers)
     orchestrator = Orchestrator(
-        model_path=model_path,
-        local_layers=local_layers,
-        grpc_port=grpc_port,
-        http_port=http_port
+        model_name=model_path,
+        local_layers=False  # API server is coordinator-only
     )
-    
-    # Progress callback
-    def progress_callback(message: str):
-        logger.info(f"[SETUP] {message}")
     
     # Run setup
     try:
-        result = await orchestrator.setup(progress_callback=progress_callback)
+        plan = await orchestrator.setup()
         
         logger.info("=" * 80)
         logger.info("✓ SETUP COMPLETE")
-        logger.info(f"  Peers: {len(result['peers'])}")
-        logger.info(f"  Plan: {result['plan']}")
+        logger.info(f"  Total layers: {plan.total_layers}")
+        logger.info(f"  Shards: {len(plan.shards)}")
+        logger.info(f"  Memory required: {plan.total_memory_required_gb:.1f}GB")
         logger.info("=" * 80)
         
         # Store setup info
         setup_info = {
-            "peers": result["peers"],
-            "plan": result["plan"],
-            "coordinator_id": result["coordinator_id"],
+            "plan": plan.to_dict(),
             "model_path": model_path,
-            "local_layers": local_layers
+            "coordinator_only": True
         }
         
-        # Extract gRPC stubs and local layer assignment
+        # Create gRPC stubs for ALL peers (coordinator doesn't load any layers)
         grpc_stubs = []
-        local_start = None
-        local_end = None
-        
-        for peer_id, peer_info in result["peers"].items():
-            if peer_info.get("is_local"):
-                # This is the local peer
-                assignment = peer_info.get("assignment")
-                if assignment:
-                    local_start = assignment["start_layer"]
-                    local_end = assignment["end_layer"]
-            else:
-                # Remote peer - create gRPC stub
-                grpc_addr = f"{peer_info['ip']}:{peer_info['grpc_port']}"
+        for shard in plan.shards:
+            # Get peer info from orchestrator's discovered peers
+            peer = next((p for p in orchestrator.discovery.peers.values() if p.id == shard.peer_id), None)
+            if peer:
+                grpc_addr = f"{peer.host}:{peer.grpc_port}"
                 channel_options = [
                     ('grpc.max_metadata_size', 64 * 1024 * 1024),
                     ('grpc.max_send_message_length', -1),
@@ -826,18 +813,19 @@ async def run_orchestrator_setup(model_path: str, local_layers: bool,
                 channel = grpc.insecure_channel(grpc_addr, options=channel_options)
                 stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
                 grpc_stubs.append(stub)
-                logger.info(f"✓ Connected to remote peer: {grpc_addr}")
+                logger.info(f"✓ Connected to peer: {grpc_addr} (layers {shard.start_layer}-{shard.end_layer})")
         
-        # Initialize model provider
+        # Initialize model provider (coordinator loads NO layers, only coordinates)
         model_provider = MLXModelProvider(
             model_path=model_path,
-            start_layer=local_start,
-            end_layer=local_end,
+            start_layer=None,  # No local layers
+            end_layer=None,    # No local layers
             grpc_stubs=grpc_stubs
         )
         
         setup_complete = True
-        return result
+        logger.info("✓ API server ready - all inference will be distributed to peers")
+        return {"plan": plan.to_dict()}
     
     except Exception as e:
         logger.error(f"Setup failed: {e}", exc_info=True)
@@ -855,17 +843,8 @@ def main():
         required=True,
         help="Path to MLX model or HuggingFace repo"
     )
-    parser.add_argument(
-        "--local-layers",
-        action="store_true",
-        default=True,
-        help="Include local machine as a peer (default: True)"
-    )
-    parser.add_argument(
-        "--no-local-layers",
-        action="store_true",
-        help="Exclude local machine from inference (coordinator only)"
-    )
+    # Note: API server is coordinator-only, it does not load model layers
+    # Users should start separate peer processes with mlx-shard-peer
     parser.add_argument(
         "--grpc-port",
         type=int,
@@ -912,18 +891,10 @@ def main():
     else:
         logging.warning("⚠ No API keys configured - authentication disabled!")
     
-    # Determine local_layers setting
-    local_layers = args.local_layers and not args.no_local_layers
-    
     # Run orchestrator setup in background
     async def startup():
         try:
-            await run_orchestrator_setup(
-                model_path=args.model,
-                local_layers=local_layers,
-                grpc_port=args.grpc_port,
-                http_port=args.http_port
-            )
+            await run_orchestrator_setup(model_path=args.model)
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")
             sys.exit(1)

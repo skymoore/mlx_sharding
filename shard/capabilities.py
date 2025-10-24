@@ -76,27 +76,29 @@ class SystemCapabilities:
             num_attention_heads = config.get("num_attention_heads", 32)
             vocab_size = config.get("vocab_size", 32000)
             
-            # Check for quantization
+            # Get actual model file size (most reliable method)
+            total_file_size = 0
+            for pattern in ["*.safetensors", "*.bin"]:
+                for file_path in model_path.glob(pattern):
+                    if file_path.is_file():
+                        total_file_size += file_path.stat().st_size
+            
+            # Use actual file size as weights estimate (most accurate)
+            weights_gb = total_file_size / (1024**3)
+            
+            # Check for quantization info (for logging purposes)
             quantization = config.get("quantization", {})
-            bits = quantization.get("group_size", 16) if quantization else 16
-            bytes_per_param = bits / 8
+            quantization_config = config.get("quantization_config", {})
             
-            # Estimate parameter count (rough approximation)
-            # Transformer: embeddings + layers + head
-            embedding_params = vocab_size * hidden_size
-            layer_params = (
-                # Self-attention
-                4 * hidden_size * hidden_size +  # Q, K, V, O projections
-                # FFN
-                8 * hidden_size * hidden_size +  # Up, down projections (typical 4x expansion)
-                # Layer norms
-                2 * hidden_size
-            )
-            total_layer_params = num_layers * layer_params
-            head_params = hidden_size * vocab_size
+            bits = None
+            if quantization and isinstance(quantization, dict):
+                bits = quantization.get("bits")
+            if bits is None and quantization_config and isinstance(quantization_config, dict):
+                bits = quantization_config.get("bits")
+            if bits is None:
+                bits = 16  # Default assumption
             
-            total_params = embedding_params + total_layer_params + head_params
-            weights_gb = (total_params * bytes_per_param) / (1024**3)
+            logger.info(f"Model file size: {weights_gb:.1f}GB ({bits}-bit quantization)")
             
             # KV cache estimation
             # KV cache per layer: 2 (K and V) * batch_size * num_heads * seq_len * head_dim

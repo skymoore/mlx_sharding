@@ -60,15 +60,16 @@ class PeerServer:
     """HTTP server for peer control and file reception."""
     
     def __init__(self, grpc_port: int = 50051, http_port: int = 8081, 
-                 cache_dir: str = "~/.cache/mlx-sharding"):
+                 cache_dir: str = "~/.cache/mlx-sharding", bind_ip: Optional[str] = None):
         self.app = FastAPI(title="MLX Shard Peer", version="2.0.0")
         self.grpc_port = grpc_port
         self.http_port = http_port
+        self.bind_ip = bind_ip
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # State
-        self.discovery = PeerDiscovery(role="peer")
+        self.discovery = PeerDiscovery(role="peer", bind_ip=bind_ip)
         self.capabilities = SystemCapabilities.get_capabilities()
         self.state = "idle"  # idle, receiving_files, loading_model, ready, error
         self.model = None
@@ -83,6 +84,8 @@ class PeerServer:
         self._setup_routes()
         
         logger.info(f"Peer server initialized (gRPC={grpc_port}, HTTP={http_port})")
+        if bind_ip:
+            logger.info(f"Binding to IP: {bind_ip}")
         logger.info(f"Cache directory: {self.cache_dir}")
         logger.info(f"Capabilities: {self.capabilities['ram_available_gb']:.1f}GB RAM, "
                    f"{self.capabilities['cpu_cores']} cores")
@@ -399,6 +402,12 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--bind-ip",
+        type=str,
+        default=None,
+        help="Specific IP address to bind to (optional, auto-detect if not specified)"
+    )
     
     args = parser.parse_args()
     
@@ -409,7 +418,8 @@ def main():
     server = PeerServer(
         grpc_port=args.grpc_port,
         http_port=args.http_port,
-        cache_dir=args.cache_dir
+        cache_dir=args.cache_dir,
+        bind_ip=args.bind_ip
     )
     
     # Setup signal handlers
