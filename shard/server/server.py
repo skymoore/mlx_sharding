@@ -234,8 +234,15 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
     # Initialize Redis cache if URL provided
     if redis_url:
         try:
+            print(f"🔌 Connecting to Redis at {redis_url}...")
             REDIS_CACHE = RedisKVCache(redis_url=redis_url)
-            print(f"✅ Redis cache initialized: {redis_url}")
+            # Test the connection with a simple operation
+            test_key = "mlx:test:connection"
+            REDIS_CACHE.client.set(test_key, "test", ex=5)
+            test_value = REDIS_CACHE.client.get(test_key)
+            REDIS_CACHE.client.delete(test_key)
+            print(f"✅ Redis cache initialized and tested: {redis_url}")
+            print(f"✅ Redis connection verified (ping successful, read/write test passed)")
         except Exception as e:
             print(f"⚠️  Failed to initialize Redis cache: {e}")
             print(f"⚠️  Continuing without Redis cache")

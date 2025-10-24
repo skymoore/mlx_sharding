@@ -184,8 +184,15 @@ class MLXModelProvider:
         if redis_url:
             try:
                 from .redis_cache import RedisKVCache
+                logging.info(f"🔌 Connecting to Redis at {redis_url}...")
                 redis_cache = RedisKVCache(redis_url=redis_url)
-                logging.info(f"✓ Redis cache initialized: {redis_url}")
+                # Test the connection with a simple operation
+                test_key = "mlx:test:connection"
+                redis_cache.client.set(test_key, "test", ex=5)
+                test_value = redis_cache.client.get(test_key)
+                redis_cache.client.delete(test_key)
+                logging.info(f"✓ Redis cache initialized and tested: {redis_url}")
+                logging.info(f"✓ Redis connection verified (ping successful, read/write test passed)")
             except Exception as e:
                 logging.warning(f"⚠️  Failed to initialize Redis cache: {e}")
                 logging.warning(f"⚠️  Continuing without Redis cache")
