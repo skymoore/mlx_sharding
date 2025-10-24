@@ -137,11 +137,12 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                     try:
                         redis_cache = REDIS_CACHE.get_cache(session_id, start_layer, end_layer)
                         if redis_cache is not None:
-                            # Redis cache is already the right size (only this peer's layers)
-                            # But CACHE is full-sized (all model layers)
-                            # We need to insert redis_cache into the correct positions in CACHE
+                            # CRITICAL: Redis cache contains ONLY this peer's layers
+                            # CACHE is full-sized (92 layers), but only layers [start_layer:end_layer] are used
+                            # We must replace ONLY the used portion of CACHE
                             
-                            # Replace the relevant slice of CACHE with redis_cache
+                            # The model only uses cache[start_layer:end_layer] during forward pass
+                            # So we replace that slice with the Redis cache
                             for i, kv in enumerate(redis_cache):
                                 cache_to_use[start_layer + i] = kv
                             
