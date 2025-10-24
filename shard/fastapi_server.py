@@ -34,7 +34,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[Message]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
-    max_tokens: Optional[int] = 100
+    max_tokens: Optional[int] = 2048  # Increased for reasoning models with <think> blocks
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
     repetition_penalty: Optional[float] = 1.0
@@ -46,7 +46,7 @@ class CompletionRequest(BaseModel):
     prompt: str
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
-    max_tokens: Optional[int] = 100
+    max_tokens: Optional[int] = 2048  # Increased for reasoning models
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
 
@@ -205,11 +205,34 @@ async def completions(request: CompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def check_stop_sequences(text: str, stop_sequences: List[str]) -> tuple[bool, str]:
+    """Check if text contains any stop sequences and trim if found."""
+    for stop_seq in stop_sequences:
+        if stop_seq in text:
+            # Find the position and trim
+            pos = text.find(stop_seq)
+            return True, text[:pos]
+    return False, text
+
+
 async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.array) -> Dict[str, Any]:
     """Generate non-streaming chat completion."""
     tokens = []
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
+    
+    # Prepare stop sequences
+    stop_sequences = []
+    if request.stop:
+        if isinstance(request.stop, str):
+            stop_sequences = [request.stop]
+        else:
+            stop_sequences = request.stop
+    
+    # Add default stop sequences for GLM models
+    stop_sequences.extend(["<|user|>", "<|endoftext|>", "<|observation|>"])
+    
+    finish_reason = "length"
     
     for (token, _), _ in zip(
         model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
@@ -218,12 +241,23 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
         tokens.append(token)
         detokenizer.add_token(token)
         
-        # Check for stop conditions
+        # Check for EOS token
         if token == model_provider.tokenizer.eos_token_id:
+            finish_reason = "stop"
+            break
+        
+        # Check for stop sequences in generated text
+        current_text = detokenizer.text
+        stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
+        if stop_found:
+            finish_reason = "stop"
             break
     
     detokenizer.finalize()
     text = detokenizer.text
+    
+    # Final check and trim stop sequences
+    _, text = check_stop_sequences(text, stop_sequences)
     
     return {
         "id": f"chatcmpl-{uuid.uuid4()}",
@@ -237,7 +271,7 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
                     "role": "assistant",
                     "content": text,
                 },
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {
@@ -251,53 +285,96 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
 async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.array):
     """Generate streaming chat completion."""
     import json
+    import asyncio
     
     request_id = f"chatcmpl-{uuid.uuid4()}"
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
     
-    for (token, _), _ in zip(
-        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
-        range(request.max_tokens)
-    ):
-        detokenizer.add_token(token)
-        text = detokenizer.last_segment
+    # Prepare stop sequences
+    stop_sequences = []
+    if request.stop:
+        if isinstance(request.stop, str):
+            stop_sequences = [request.stop]
+        else:
+            stop_sequences = request.stop
+    stop_sequences.extend(["<|user|>", "<|endoftext|>", "<|observation|>"])
+    
+    finish_reason = "length"
+    
+    try:
+        for (token, _), _ in zip(
+            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            range(request.max_tokens)
+        ):
+            detokenizer.add_token(token)
+            text = detokenizer.last_segment
+            
+            # Check for EOS
+            if token == model_provider.tokenizer.eos_token_id:
+                finish_reason = "stop"
+                # Send last segment if any
+                if text:
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": request.model,
+                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                break
+            
+            # Check for stop sequences
+            current_text = detokenizer.text
+            stop_found, _ = check_stop_sequences(current_text, stop_sequences)
+            if stop_found:
+                finish_reason = "stop"
+                break
+            
+            # Send chunk
+            if text:
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
         
-        chunk = {
+        # Send final chunk
+        final_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"content": text},
-                    "finish_reason": None,
-                }
-            ],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
         }
-        
-        yield f"data: {json.dumps(chunk)}\n\n"
-        
-        if token == model_provider.tokenizer.eos_token_id:
-            break
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
     
-    # Send final chunk
-    final_chunk = {
-        "id": request_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": request.model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
+    except GeneratorExit:
+        # Client disconnected (user pressed stop button)
+        logging.info(f"Client disconnected during streaming (request {request_id})")
+        raise  # Re-raise to properly close the generator
+    
+    except Exception as e:
+        logging.error(f"Error in streaming: {e}", exc_info=True)
+        # Send error chunk
+        try:
+            error_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
             }
-        ],
-    }
-    yield f"data: {json.dumps(final_chunk)}\n\n"
-    yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        except GeneratorExit:
+            pass  # Client already disconnected
 
 
 async def generate_completion(request: CompletionRequest, prompt: mx.array) -> Dict[str, Any]:
@@ -342,38 +419,54 @@ async def generate_completion(request: CompletionRequest, prompt: mx.array) -> D
 async def stream_completion(request: CompletionRequest, prompt: mx.array):
     """Generate streaming completion."""
     import json
+    import asyncio
     
     request_id = f"cmpl-{uuid.uuid4()}"
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
     
-    for (token, _), _ in zip(
-        model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
-        range(request.max_tokens)
-    ):
-        detokenizer.add_token(token)
-        text = detokenizer.last_segment
-        
-        chunk = {
-            "id": request_id,
-            "object": "text_completion",
-            "created": int(time.time()),
-            "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": text,
-                    "finish_reason": None,
+    try:
+        for (token, _), _ in zip(
+            model_provider.generate(prompt, temperature=request.temperature, top_p=request.top_p),
+            range(request.max_tokens)
+        ):
+            detokenizer.add_token(token)
+            text = detokenizer.last_segment
+            
+            if text:
+                chunk = {
+                    "id": request_id,
+                    "object": "text_completion",
+                    "created": int(time.time()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": text,
+                            "finish_reason": None,
+                        }
+                    ],
                 }
-            ],
-        }
+                
+                yield f"data: {json.dumps(chunk)}\n\n"
+                await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
+            
+            if token == model_provider.tokenizer.eos_token_id:
+                break
         
-        yield f"data: {json.dumps(chunk)}\n\n"
-        
-        if token == model_provider.tokenizer.eos_token_id:
-            break
+        yield "data: [DONE]\n\n"
     
-    yield "data: [DONE]\n\n"
+    except GeneratorExit:
+        # Client disconnected (user pressed stop button)
+        logging.info(f"Client disconnected during streaming (request {request_id})")
+        raise  # Re-raise to properly close the generator
+    
+    except Exception as e:
+        logging.error(f"Error in streaming: {e}", exc_info=True)
+        try:
+            yield "data: [DONE]\n\n"
+        except GeneratorExit:
+            pass  # Client already disconnected
 
 
 def main():
