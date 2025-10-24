@@ -384,6 +384,8 @@ def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
             logger.info(f"🎯 Final tensor from pipeline: shape={tensor.shape}, dtype={tensor.dtype}")
             logits = tensor[:, -1, :]
             logger.info(f"🎯 Extracted logits: shape={logits.shape}")
+            logger.info(f"🔍 Logits stats: min={logits.min().item():.4f}, max={logits.max().item():.4f}, mean={logits.mean().item():.4f}, std={logits.std().item():.4f}")
+            logger.info(f"🔍 Top 5 token IDs: {mx.argsort(logits[0])[-5:].tolist()}")
             
             # Apply logits processors (repetition penalty, logit bias, etc.)
             for processor in logits_processors:
