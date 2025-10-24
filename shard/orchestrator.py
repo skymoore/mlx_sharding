@@ -145,7 +145,6 @@ class APIServerOrchestrator:
     
     def __init__(self, 
                  model_name: str,
-                 local_layers: bool = True,
                  context_length: int = 8192,
                  safety_margin: float = 0.15,
                  discovery_timeout: float = 10.0,
@@ -156,7 +155,6 @@ class APIServerOrchestrator:
         
         Args:
             model_name: HuggingFace model name or local path
-            local_layers: Whether to host layers locally
             context_length: Target context length for KV cache
             safety_margin: Memory safety margin (default 15%)
             discovery_timeout: Peer discovery timeout in seconds
@@ -164,7 +162,6 @@ class APIServerOrchestrator:
             http_port: HTTP port for announcement (default: 8081)
         """
         self.model_name = model_name
-        self.local_layers = local_layers
         self.context_length = context_length
         self.safety_margin = safety_margin
         self.discovery_timeout = discovery_timeout
@@ -222,13 +219,10 @@ class APIServerOrchestrator:
         
         self.discovery = PeerDiscovery(role="coordinator")
         
-        # Always announce to enable discovery (even if not hosting layers)
+        # Always announce to enable discovery
         caps = SystemCapabilities.get_capabilities()
         self.discovery.announce(self.grpc_port, self.http_port, caps)
-        if self.local_layers:
-            logger.info("Announced as coordinator with local layers")
-        else:
-            logger.info("Announced as coordinator (discovery only)")
+        logger.info("Announced as coordinator (discovery only)")
         
         # Discover peers
         peers = self.discovery.discover_peers(self.discovery_timeout)

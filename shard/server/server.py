@@ -7,10 +7,8 @@ from mlx_lm.models.cache import KVCache
 import threading
 import time
 from typing import Optional
-from ..redis_cache import RedisKVCache
 
 MODEL = None
-REDIS_CACHE: Optional[RedisKVCache] = None
 CACHES = {}  # session_id -> list[KVCache]
 
 # Global chunk buffer
@@ -194,10 +192,10 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             )
 
 
-def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None, redis_url=None):
-    global MODEL, REDIS_CACHE
+def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None):
+    global MODEL
     
-    # Use preloaded model if provided (V2 architecture), otherwise load it (V1 architecture)
+    # Use preloaded model if provided, otherwise load it
     if preloaded_model is not None:
         MODEL = preloaded_model
     else:
@@ -213,26 +211,6 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
         print(f"end_layer: {MODEL.end_layer}")
     if hasattr(MODEL, 'args'):
         print(f"num_hidden_layers: {MODEL.args.num_hidden_layers}")
-    
-    # Initialize Redis cache if URL provided
-    if redis_url:
-        try:
-            print(f"Connecting to Redis at {redis_url}...")
-            REDIS_CACHE = RedisKVCache(redis_url=redis_url)
-            # Test the connection with a simple operation
-            test_key = "mlx:test:connection"
-            REDIS_CACHE.client.set(test_key, "test", ex=5)
-            test_value = REDIS_CACHE.client.get(test_key)
-            REDIS_CACHE.client.delete(test_key)
-            print(f"Redis cache initialized and tested: {redis_url}")
-            print(f"Redis connection verified (ping successful, read/write test passed)")
-        except Exception as e:
-            print(f"Failed to initialize Redis cache: {e}")
-            print(f"Continuing without Redis cache")
-            REDIS_CACHE = None
-    else:
-        print(f"No Redis URL provided, using local cache only")
-        REDIS_CACHE = None
     
     # No initial reset needed - caches created per session
     

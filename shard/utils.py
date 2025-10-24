@@ -297,7 +297,7 @@ def create_generate_step_with_grpc(grpc_stubs: List):
     return generate_step
 
 
-def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
+def create_coordinator_generate_step(grpc_stubs: List):
     """
     Create generation function for coordinator-only mode (no local model).
     Coordinator sends tokens through pipeline and samples from returned logits.
@@ -311,7 +311,6 @@ def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
     
     Args:
         grpc_stubs: Ordered list of gRPC stubs (by layer range)
-        redis_cache: Optional RedisKVCache instance for distributed cache
     
     Returns:
         Generator function that yields (token, logprobs) tuples
@@ -411,21 +410,10 @@ def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
         # Generate tokens
         y, logprobs = _step(y)
         mx.async_eval(y)
-        try:
-            while True:
-                next_y, next_logprobs = _step(y)
-                mx.async_eval(next_y)
-                yield y.item(), logprobs
-                y, logprobs = next_y, next_logprobs
-        finally:
-            # Cleanup: delete session cache from Redis when generation completes
-            if redis_cache is not None:
-                try:
-                    # We don't know num_layers here, so we'll use a large number
-                    # Redis will only delete keys that exist
-                    redis_cache.delete_session(session_id, num_layers=200)
-                    logger.info(f"🧹 Cleaned up Redis cache for session {session_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup Redis cache for session {session_id}: {e}")
+        while True:
+            next_y, next_logprobs = _step(y)
+            mx.async_eval(next_y)
+            yield y.item(), logprobs
+            y, logprobs = next_y, next_logprobs
     
     return generate_step
