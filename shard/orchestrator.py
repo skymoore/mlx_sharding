@@ -148,7 +148,9 @@ class APIServerOrchestrator:
                  local_layers: bool = True,
                  context_length: int = 8192,
                  safety_margin: float = 0.15,
-                 discovery_timeout: float = 10.0):
+                 discovery_timeout: float = 10.0,
+                 grpc_port: int = 50051,
+                 http_port: int = 8081):
         """
         Initialize orchestrator.
         
@@ -158,12 +160,16 @@ class APIServerOrchestrator:
             context_length: Target context length for KV cache
             safety_margin: Memory safety margin (default 15%)
             discovery_timeout: Peer discovery timeout in seconds
+            grpc_port: gRPC port for announcement (default: 50051)
+            http_port: HTTP port for announcement (default: 8081)
         """
         self.model_name = model_name
         self.local_layers = local_layers
         self.context_length = context_length
         self.safety_margin = safety_margin
         self.discovery_timeout = discovery_timeout
+        self.grpc_port = grpc_port
+        self.http_port = http_port
         
         self.progress = ProgressTracker()
         self.discovery: Optional[PeerDiscovery] = None
@@ -218,7 +224,7 @@ class APIServerOrchestrator:
         
         # Always announce to enable discovery (even if not hosting layers)
         caps = SystemCapabilities.get_capabilities()
-        self.discovery.announce(50051, 8081, caps)
+        self.discovery.announce(self.grpc_port, self.http_port, caps)
         if self.local_layers:
             logger.info("Announced as coordinator with local layers")
         else:

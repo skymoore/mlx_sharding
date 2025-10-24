@@ -761,7 +761,7 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
             pass
 
 
-async def run_orchestrator_setup(model_path: str) -> Dict[str, Any]:
+async def run_orchestrator_setup(model_path: str, grpc_port: int, http_port: int) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider
     
@@ -775,7 +775,9 @@ async def run_orchestrator_setup(model_path: str) -> Dict[str, Any]:
     # Create orchestrator (coordinator-only mode - no local layers)
     orchestrator = Orchestrator(
         model_name=model_path,
-        local_layers=False  # API server is coordinator-only
+        local_layers=False,  # API server is coordinator-only
+        grpc_port=grpc_port,
+        http_port=http_port
     )
     
     # Run setup
@@ -894,7 +896,11 @@ def main():
     # Run orchestrator setup in background
     async def startup():
         try:
-            await run_orchestrator_setup(model_path=args.model)
+            await run_orchestrator_setup(
+                model_path=args.model,
+                grpc_port=args.grpc_port,
+                http_port=args.http_port
+            )
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")
             sys.exit(1)

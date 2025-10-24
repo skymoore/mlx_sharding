@@ -256,6 +256,18 @@ class PeerDiscovery:
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.udp_running = True
             
+            # Get the IP to advertise (bind_ip if set, otherwise let receiver use source IP)
+            advertised_ip = None
+            if self.bind_ip:
+                advertised_ip = self.bind_ip
+            else:
+                # Try to get primary IP
+                try:
+                    hostname = socket.gethostname()
+                    advertised_ip = socket.gethostbyname(hostname)
+                except Exception:
+                    pass  # Will use source IP from UDP packet
+            
             # Broadcast message
             message = {
                 'type': 'announcement',
@@ -269,6 +281,10 @@ class PeerDiscovery:
                 'layers_loaded': '',
                 **capabilities
             }
+            
+            # Add advertised IP if we have one
+            if advertised_ip:
+                message['advertised_ip'] = advertised_ip
             
             def broadcast_loop():
                 while self.udp_running:
@@ -340,10 +356,13 @@ class PeerDiscovery:
             if not peer_id:
                 return
             
+            # Use advertised_ip if present, otherwise use source IP from packet
+            peer_host = message.get('advertised_ip', host)
+            
             peer_info = PeerInfo(
                 id=peer_id,
-                address=f"{host}:{message.get('grpc_port')}",
-                host=host,
+                address=f"{peer_host}:{message.get('grpc_port')}",
+                host=peer_host,
                 grpc_port=message.get('grpc_port'),
                 http_port=message.get('http_port'),
                 role=message.get('role', 'peer'),
