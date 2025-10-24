@@ -681,9 +681,10 @@ def main():
         mx.metal.set_cache_limit(args.cache_limit_gb * 1024 * 1024 * 1024)
 
     channel_options = [
-        ('grpc.max_metadata_size', 32 * 1024 * 1024),
-        ('grpc.max_send_message_length', 1280 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 1280 * 1024 * 1024),
+        ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
+        ('grpc.max_send_message_length', 4 * 1024 * 1024 * 1024),  # 4GB send
+        ('grpc.max_receive_message_length', 4 * 1024 * 1024 * 1024),  # 4GB receive
+        ('grpc.http2.max_frame_size', 16 * 1024 * 1024),  # 16MB frames
     ]
 
     shard_addresses = [addr.strip()

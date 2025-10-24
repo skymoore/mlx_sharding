@@ -2,12 +2,17 @@
 FastAPI-based OpenAI-compatible API server for MLX Sharding.
 A cleaner, more robust alternative to the built-in HTTP server.
 """
+import os
 import argparse
 import logging
 import time
 import uuid
 from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
+
+# Suppress verbose gRPC error logs (especially "Message too long" warnings)
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_TRACE'] = ''
 
 import mlx.core as mx
 from fastapi import FastAPI, HTTPException
@@ -107,6 +112,19 @@ class MLXModelProvider:
         self.created = int(time.time())
         
         logging.info(f"Model loaded: {self.model_name}")
+    
+    def get_default_stop_sequences(self) -> List[str]:
+        """Get model-specific default stop sequences."""
+        model_type = getattr(self.model, 'model_type', '')
+        
+        # Model-specific stop sequences
+        if model_type == 'qwen3_moe' or model_type.startswith('qwen'):
+            return ["<|im_end|>", "<|endoftext|>"]
+        elif model_type == 'glm4_moe' or model_type.startswith('glm'):
+            return ["<|user|>", "<|endoftext|>", "<|observation|>"]
+        else:
+            # Generic stop sequences
+            return ["<|endoftext|>"]
     
     def generate(self, prompt: mx.array, **kwargs):
         """Generate tokens using the model."""
@@ -229,8 +247,8 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
         else:
             stop_sequences = request.stop
     
-    # Add default stop sequences for GLM models
-    stop_sequences.extend(["<|user|>", "<|endoftext|>", "<|observation|>"])
+    # Add model-specific default stop sequences
+    stop_sequences.extend(model_provider.get_default_stop_sequences())
     
     finish_reason = "length"
     
@@ -298,7 +316,7 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             stop_sequences = [request.stop]
         else:
             stop_sequences = request.stop
-    stop_sequences.extend(["<|user|>", "<|endoftext|>", "<|observation|>"])
+    stop_sequences.extend(model_provider.get_default_stop_sequences())
     
     finish_reason = "length"
     
@@ -308,32 +326,42 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             range(request.max_tokens)
         ):
             detokenizer.add_token(token)
-            text = detokenizer.last_segment
             
             # Check for EOS
             if token == model_provider.tokenizer.eos_token_id:
                 finish_reason = "stop"
-                # Send last segment if any
-                if text:
-                    chunk = {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": request.model,
-                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
                 break
             
-            # Check for stop sequences
+            # Check for stop sequences in full text
             current_text = detokenizer.text
-            stop_found, _ = check_stop_sequences(current_text, stop_sequences)
+            stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
             if stop_found:
                 finish_reason = "stop"
+                # Calculate what part of the trimmed text we haven't sent yet
+                # This is tricky with streaming, so we just stop here
                 break
             
-            # Send chunk
+            # Get the segment to send
+            text = detokenizer.last_segment
+            
+            # Check if this segment contains a stop sequence
             if text:
+                segment_stop_found, trimmed_segment = check_stop_sequences(text, stop_sequences)
+                if segment_stop_found:
+                    # Send only the part before the stop sequence
+                    if trimmed_segment:
+                        chunk = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": request.model,
+                            "choices": [{"index": 0, "delta": {"content": trimmed_segment}, "finish_reason": None}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    finish_reason = "stop"
+                    break
+                
+                # Send the full segment
                 chunk = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
@@ -501,9 +529,11 @@ def main():
     grpc_stubs = []
     if args.llm_shard_addresses:
         channel_options = [
-            ('grpc.max_metadata_size', 32 * 1024 * 1024),
-            ('grpc.max_send_message_length', 1280 * 1024 * 1024),
-            ('grpc.max_receive_message_length', 1280 * 1024 * 1024),
+            ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
+            ('grpc.max_send_message_length', 4 * 1024 * 1024 * 1024),  # 4GB send
+            ('grpc.max_receive_message_length', 4 * 1024 * 1024 * 1024),  # 4GB receive
+            ('grpc.http2.max_frame_size', 16 * 1024 * 1024),  # 16MB frames
+            ('grpc.http2.min_recv_ping_interval_without_data_ms', 300000),  # 5 minutes
         ]
         
         for addr in args.llm_shard_addresses.split(','):
