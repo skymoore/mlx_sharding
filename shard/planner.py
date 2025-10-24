@@ -242,12 +242,16 @@ class ShardingPlanner:
             # TODO: Integrate network path selection
             grpc_address = f"{peer.host}:{peer.grpc_port}"
             
+            # Model loading treats end_layer as inclusive, so we need to subtract 1
+            # from our exclusive end_layer to get the correct inclusive end
+            end_layer_inclusive = end_layer - 1
+            
             shard = ShardAssignment(
                 peer_id=peer.id,
                 peer_address=peer.address,
                 grpc_address=grpc_address,
                 start_layer=current_layer,
-                end_layer=end_layer,
+                end_layer=end_layer_inclusive,
                 estimated_memory_gb=shard_memory,
                 has_embedding=(current_layer == 0),
                 has_lm_head=(end_layer == self.total_layers),
@@ -255,8 +259,7 @@ class ShardingPlanner:
             
             shards.append(shard)
             
-            # end_layer is exclusive (like Python range), so actual last layer is end_layer-1
-            logger.info(f"Assigned layers {current_layer}-{end_layer-1} (inclusive) to peer {peer.id[:8]} "
+            logger.info(f"Assigned layers {current_layer}-{end_layer_inclusive} (inclusive) to peer {peer.id[:8]} "
                        f"({shard_memory:.1f}GB)")
             
             current_layer = end_layer
