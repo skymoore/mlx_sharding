@@ -31,6 +31,15 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 processed_tensor = MODEL(tensor, cache=CACHE)
                 print(f"Processed tensor with shape: {
                       processed_tensor.shape} and dtype: {processed_tensor.dtype}")
+                
+                # CRITICAL FIX: Only return the last token's logits to avoid huge messages
+                # For generation, we only need logits for the last position
+                if len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
+                    # Shape is (batch, seq_len, vocab_size)
+                    # Only keep last position: (batch, 1, vocab_size)
+                    processed_tensor = processed_tensor[:, -1:, :]
+                    print(f"Reduced to last token only: {processed_tensor.shape}")
+                
                 processed_bytes = tensor_to_bytes(processed_tensor)
                 response_tensor = mlx_tensor_pb2.Tensor(
                     tensor_data=processed_bytes,
