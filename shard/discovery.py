@@ -265,9 +265,18 @@ class PeerDiscovery:
                         data = json.dumps(message).encode('utf-8')
                         self.udp_socket.sendto(data, ('<broadcast>', UDP_PORT))
                         time.sleep(BROADCAST_INTERVAL)
+                    except OSError as e:
+                        # Network unreachable or no route to host - this is expected
+                        # when broadcasting across subnets. Just rely on mDNS instead.
+                        if self.udp_running:
+                            logger.debug(f"UDP broadcast not available: {e}")
+                            # Stop trying to broadcast if network is unreachable
+                            self.udp_running = False
+                            break
                     except Exception as e:
                         if self.udp_running:
                             logger.warning(f"UDP broadcast error: {e}")
+                            time.sleep(1)  # Back off on errors
             
             self.udp_thread = threading.Thread(target=broadcast_loop, daemon=True)
             self.udp_thread.start()

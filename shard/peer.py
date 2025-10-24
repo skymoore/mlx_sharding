@@ -241,6 +241,10 @@ class PeerServer:
                     end_layer=end_layer
                 )
                 
+                # Start gRPC server now that model is loaded
+                if self.grpc_thread is None:
+                    self.start_grpc_server()
+                
                 self.state = "ready"
                 
                 # Update discovery status
@@ -277,10 +281,14 @@ class PeerServer:
             return {"success": True, "message": "Model unloaded"}
     
     def start_grpc_server(self):
-        """Start gRPC server in background thread."""
+        """Start gRPC server in background thread (only after model is loaded)."""
+        if self.model is None:
+            logger.warning("Cannot start gRPC server without a loaded model")
+            return
+        
         def run_grpc():
-            # Note: grpc_serve expects model to be loaded already
-            # We'll need to modify it to work with dynamic model loading
+            # The gRPC server will use the globally loaded MODEL
+            # This is set when load_model is called
             grpc_serve(None, None, None, self.grpc_port)
         
         self.grpc_thread = threading.Thread(target=run_grpc, daemon=True)
@@ -289,8 +297,8 @@ class PeerServer:
     
     def start(self):
         """Start peer server."""
-        # Start gRPC server
-        self.start_grpc_server()
+        # Don't start gRPC server yet - wait for model to be loaded
+        # It will be started when load_model is called
         
         # Announce on network
         self.discovery.announce(self.grpc_port, self.http_port, self.capabilities)
