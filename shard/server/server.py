@@ -124,8 +124,10 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 process_time = time.time() - process_start
                 print(f"⚙️  Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
                 
-                # Only return last token's logits
-                if len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
+                # Only reduce to last token if this is the last peer (has lm_head)
+                # Intermediate peers need to pass full sequence for KV cache building
+                is_last_peer = hasattr(MODEL, 'lm_head')
+                if is_last_peer and len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
                     processed_tensor = processed_tensor[:, -1:, :]
                     print(f"✂️  Reduced to last token: {processed_tensor.shape}")
                 
