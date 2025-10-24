@@ -1,4 +1,3 @@
-
 import grpc
 from concurrent import futures
 from ..grpc import mlx_tensor_pb2, mlx_tensor_pb2_grpc
@@ -11,8 +10,8 @@ from typing import Optional
 from ..redis_cache import RedisKVCache
 
 MODEL = None
-CACHE = None
 REDIS_CACHE: Optional[RedisKVCache] = None
+CACHES = {}  # session_id -> list[KVCache]
 
 # Global chunk buffer
 CHUNK_BUFFERS = {}  # Key: tensor_id, Value: {'chunks': {}, 'timestamp': float, 'total': int, 'shape': tuple, 'dtype': str}
@@ -32,17 +31,17 @@ def cleanup_stale_chunks():
             ]
             
             for tid in stale_ids:
-                print(f"🧹 Cleaning up stale chunks for tensor_id: {tid}")
+                print(f"Cleaning up stale chunks for tensor_id: {tid}")
                 del CHUNK_BUFFERS[tid]
 
-def reset_cache():
-    global CACHE
+def reset_cache(session_id):
+    if not session_id:
+        raise ValueError("No session_id provided")
     if hasattr(MODEL, "make_cache"):
-        CACHE = MODEL.make_cache()
+        CACHES[session_id] = MODEL.make_cache()
     else:
         raise ValueError("Model does not have make_cache() method. Please use a compatible model.")
-    print("Cache has been reset")
-
+    print(f"Cache reset for session {session_id}")
 
 class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
     def SendTensor(self, request, context):
@@ -61,7 +60,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 tensor = mx.reshape(tensor, tensor_msg.shape)
                 recv_time = time.time() - start_time
                 tensor_size_mb = len(tensor_msg.tensor_data) / (1024 * 1024)
-                print(f"📥 Received full tensor: shape={tensor.shape}, size={tensor_size_mb:.2f}MB, time={recv_time:.2f}s, session={session_id}")
+                print(f"Received full tensor: shape={tensor.shape}, size={tensor_size_mb:.2f}MB, time={recv_time:.2f}s, session={session_id}")
                 
             elif request.HasField('chunked_tensor'):
                 # NEW: Chunked tensor path
@@ -71,7 +70,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 total_chunks = chunk.total_chunks
                 chunk_size_mb = len(chunk.chunk_data) / (1024 * 1024)
                 
-                print(f"📥 Received chunk {chunk_idx+1}/{total_chunks} for {tensor_id[:8]}... ({chunk_size_mb:.2f}MB), session={session_id}")
+                print(f"Received chunk {chunk_idx+1}/{total_chunks} for {tensor_id[:8]}... ({chunk_size_mb:.2f}MB), session={session_id}")
                 
                 with CHUNK_BUFFER_LOCK:
                     # Initialize buffer for this tensor if first chunk
@@ -90,7 +89,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                     
                     # Check if we have all chunks
                     if len(CHUNK_BUFFERS[tensor_id]['chunks']) == total_chunks:
-                        print(f"✅ All {total_chunks} chunks received, reassembling...")
+                        print(f"All {total_chunks} chunks received, reassembling...")
                         
                         # Reassemble in order
                         full_data = b''.join([
@@ -108,7 +107,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                         tensor = mx.reshape(tensor, shape)
                         total_size_mb = len(full_data) / (1024 * 1024)
                         reassemble_time = time.time() - start_time
-                        print(f"🔧 Reassembled tensor: shape={tensor.shape}, size={total_size_mb:.2f}MB, time={reassemble_time:.2f}s")
+                        print(f"Reassembled tensor: shape={tensor.shape}, size={total_size_mb:.2f}MB, time={reassemble_time:.2f}s")
                     else:
                         # Not all chunks received yet, return success but no tensor
                         return mlx_tensor_pb2.TensorResponse(
@@ -129,33 +128,37 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 # The cache persists across tokens within a generation
                 # ResetCache RPC clears it between generations
                 # NO cache synchronization needed - each peer's cache is independent
-                cache_to_use = CACHE
+                if session_id is None:
+                    session_id = "default"
+                if session_id not in CACHES:
+                    reset_cache(session_id)
+                cache_to_use = CACHES[session_id]
                 
                 process_start = time.time()
                 processed_tensor = MODEL(tensor, cache=cache_to_use)
                 process_time = time.time() - process_start
-                print(f"⚙️  Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
+                print(f"Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
                 
                 # Only reduce to last token if this is the last peer (has lm_head)
                 # Intermediate peers need to pass full sequence for KV cache building
                 is_last_peer = hasattr(MODEL, 'lm_head')
-                print(f"🔍 Debug: is_last_peer={is_last_peer}, has_lm_head={hasattr(MODEL, 'lm_head')}, model_type={type(MODEL).__name__}")
+                print(f"Debug: is_last_peer={is_last_peer}, has_lm_head={hasattr(MODEL, 'lm_head')}, model_type={type(MODEL).__name__}")
                 if hasattr(MODEL, 'start_layer') and hasattr(MODEL, 'end_layer'):
-                    print(f"🔍 Debug: start_layer={MODEL.start_layer}, end_layer={MODEL.end_layer}")
+                    print(f"Debug: start_layer={MODEL.start_layer}, end_layer={MODEL.end_layer}")
                 if hasattr(MODEL, 'args'):
-                    print(f"🔍 Debug: num_hidden_layers={MODEL.args.num_hidden_layers}")
+                    print(f"Debug: num_hidden_layers={MODEL.args.num_hidden_layers}")
                 
                 if is_last_peer and len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
                     processed_tensor = processed_tensor[:, -1:, :]
-                    print(f"✂️  Reduced to last token: {processed_tensor.shape}")
+                    print(f"Reduced to last token: {processed_tensor.shape}")
                 elif len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
-                    print(f"⏩ Passing full sequence (intermediate peer): {processed_tensor.shape}")
+                    print(f"Passing full sequence (intermediate peer): {processed_tensor.shape}")
                 
                 serialize_start = time.time()
                 processed_bytes = tensor_to_bytes(processed_tensor)
                 serialize_time = time.time() - serialize_start
                 response_size_mb = len(processed_bytes) / (1024 * 1024)
-                print(f"📤 Sending response: size={response_size_mb:.2f}MB, time={serialize_time:.2f}s")
+                print(f"Sending response: size={response_size_mb:.2f}MB, time={serialize_time:.2f}s")
                 
                 response_tensor = mlx_tensor_pb2.Tensor(
                     tensor_data=processed_bytes,
@@ -175,14 +178,14 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 )
                 
         except Exception as e:
-            print(f"❌ Error processing tensor: {e}")
+            print(f"Error processing tensor: {e}")
             import traceback
             traceback.print_exc()
             return mlx_tensor_pb2.TensorResponse(success=False, message=str(e), tensor=None)
 
     def ResetCache(self, request, context):
         try:
-            reset_cache()
+            reset_cache(request.session_id)
             return mlx_tensor_pb2.ResetCacheResponse(
                 success=True,
                 message="Cache reset successfully"
@@ -205,42 +208,42 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
         MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
     
     # Debug: Print model structure
-    print(f"🔍 Model loaded: type={type(MODEL).__name__}")
-    print(f"🔍 Model attributes: {dir(MODEL)}")
-    print(f"🔍 Has lm_head: {hasattr(MODEL, 'lm_head')}")
+    print(f"Model loaded: type={type(MODEL).__name__}")
+    print(f"Model attributes: {dir(MODEL)}")
+    print(f"Has lm_head: {hasattr(MODEL, 'lm_head')}")
     if hasattr(MODEL, 'start_layer'):
-        print(f"🔍 start_layer: {MODEL.start_layer}")
+        print(f"start_layer: {MODEL.start_layer}")
     if hasattr(MODEL, 'end_layer'):
-        print(f"🔍 end_layer: {MODEL.end_layer}")
+        print(f"end_layer: {MODEL.end_layer}")
     if hasattr(MODEL, 'args'):
-        print(f"🔍 num_hidden_layers: {MODEL.args.num_hidden_layers}")
+        print(f"num_hidden_layers: {MODEL.args.num_hidden_layers}")
     
     # Initialize Redis cache if URL provided
     if redis_url:
         try:
-            print(f"🔌 Connecting to Redis at {redis_url}...")
+            print(f"Connecting to Redis at {redis_url}...")
             REDIS_CACHE = RedisKVCache(redis_url=redis_url)
             # Test the connection with a simple operation
             test_key = "mlx:test:connection"
             REDIS_CACHE.client.set(test_key, "test", ex=5)
             test_value = REDIS_CACHE.client.get(test_key)
             REDIS_CACHE.client.delete(test_key)
-            print(f"✅ Redis cache initialized and tested: {redis_url}")
-            print(f"✅ Redis connection verified (ping successful, read/write test passed)")
+            print(f"Redis cache initialized and tested: {redis_url}")
+            print(f"Redis connection verified (ping successful, read/write test passed)")
         except Exception as e:
-            print(f"⚠️  Failed to initialize Redis cache: {e}")
-            print(f"⚠️  Continuing without Redis cache")
+            print(f"Failed to initialize Redis cache: {e}")
+            print(f"Continuing without Redis cache")
             REDIS_CACHE = None
     else:
-        print(f"ℹ️  No Redis URL provided, using local cache only")
+        print(f"No Redis URL provided, using local cache only")
         REDIS_CACHE = None
     
-    reset_cache()
+    # No initial reset needed - caches created per session
     
     # Start cleanup thread
     cleanup_thread = threading.Thread(target=cleanup_stale_chunks, daemon=True)
     cleanup_thread.start()
-    print("🧹 Started chunk cleanup thread")
+    print("Started chunk cleanup thread")
     
     server_options = [
         ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
@@ -262,4 +265,3 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
         actual_end = (end_layer - 1) if end_layer else 'end'
         print(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
     server.wait_for_termination()
-
