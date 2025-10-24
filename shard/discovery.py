@@ -193,12 +193,14 @@ class PeerDiscovery:
         try:
             self.zeroconf = Zeroconf()
             
-            # Get local IP (use bind_ip if specified)
+            # Get hostname and local IP
+            hostname = socket.gethostname()
+            
+            # Use bind_ip if specified, otherwise auto-detect
             if self.bind_ip:
                 local_ip = self.bind_ip
                 logger.info(f"Using specified bind IP: {local_ip}")
             else:
-                hostname = socket.gethostname()
                 local_ip = socket.gethostbyname(hostname)
             
             # Create service info
