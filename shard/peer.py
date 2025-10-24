@@ -60,11 +60,13 @@ class PeerServer:
     """HTTP server for peer control and file reception."""
     
     def __init__(self, grpc_port: int = 50051, http_port: int = 8081, 
-                 cache_dir: str = "~/.cache/mlx-sharding", bind_ip: Optional[str] = None):
+                 cache_dir: str = "~/.cache/mlx-sharding", bind_ip: Optional[str] = None,
+                 redis_url: Optional[str] = None):
         self.app = FastAPI(title="MLX Shard Peer", version="2.0.0")
         self.grpc_port = grpc_port
         self.http_port = http_port
         self.bind_ip = bind_ip
+        self.redis_url = redis_url
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
@@ -381,7 +383,8 @@ class PeerServer:
         
         def run_grpc():
             # Start gRPC server with preloaded model (V2 architecture)
-            grpc_serve(model_path, start_layer, end_layer, self.grpc_port, preloaded_model=self.model)
+            grpc_serve(model_path, start_layer, end_layer, self.grpc_port, 
+                      preloaded_model=self.model, redis_url=self.redis_url)
         
         self.grpc_thread = threading.Thread(target=run_grpc, daemon=True)
         self.grpc_thread.start()
@@ -451,6 +454,12 @@ def main():
         default=None,
         help="Specific IP address to bind to (optional, auto-detect if not specified)"
     )
+    parser.add_argument(
+        "--redis-url",
+        type=str,
+        default=None,
+        help="Redis URL for distributed cache (e.g., redis://localhost:6379)"
+    )
     
     args = parser.parse_args()
     
@@ -462,7 +471,8 @@ def main():
         grpc_port=args.grpc_port,
         http_port=args.http_port,
         cache_dir=args.cache_dir,
-        bind_ip=args.bind_ip
+        bind_ip=args.bind_ip,
+        redis_url=args.redis_url
     )
     
     # Setup signal handlers

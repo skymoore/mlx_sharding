@@ -168,21 +168,33 @@ app.add_middleware(
 class MLXModelProvider:
     """Manages model loading and generation with distributed inference."""
     
-    def __init__(self, model_path: str, start_layer: Optional[int], end_layer: Optional[int], grpc_stubs: List):
+    def __init__(self, model_path: str, start_layer: Optional[int], end_layer: Optional[int], grpc_stubs: List, redis_url: Optional[str] = None):
         self.model_path = model_path
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.grpc_stubs = grpc_stubs
+        self.redis_url = redis_url
         
         # Load tokenizer (always needed)
         tokenizer_path = Path(model_path) if Path(model_path).exists() else hf_repo_to_path(model_path)
         self.tokenizer = load_tokenizer(tokenizer_path)
         
+        # Initialize Redis cache if URL provided
+        redis_cache = None
+        if redis_url:
+            try:
+                from .redis_cache import RedisKVCache
+                redis_cache = RedisKVCache(redis_url=redis_url)
+                logging.info(f"✓ Redis cache initialized: {redis_url}")
+            except Exception as e:
+                logging.warning(f"⚠️  Failed to initialize Redis cache: {e}")
+                logging.warning(f"⚠️  Continuing without Redis cache")
+        
         # Coordinator mode: no local layers
         if start_layer is None and end_layer is None:
             logging.info("Coordinator-only mode: no local model, pipeline coordination only")
             self.model = None
-            self.generate_step = create_coordinator_generate_step(grpc_stubs)
+            self.generate_step = create_coordinator_generate_step(grpc_stubs, redis_cache=redis_cache)
             
             # Get model type from config for tool calling
             config_path = tokenizer_path / "config.json"
@@ -784,7 +796,7 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
             pass
 
 
-async def run_orchestrator_setup(model_path: str, grpc_port: int, http_port: int) -> Dict[str, Any]:
+async def run_orchestrator_setup(model_path: str, grpc_port: int, http_port: int, redis_url: Optional[str] = None) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider
     
@@ -845,7 +857,8 @@ async def run_orchestrator_setup(model_path: str, grpc_port: int, http_port: int
             model_path=model_path,
             start_layer=None,  # No local layers
             end_layer=None,    # No local layers
-            grpc_stubs=grpc_stubs
+            grpc_stubs=grpc_stubs,
+            redis_url=redis_url
         )
         
         setup_complete = True
@@ -895,6 +908,12 @@ def main():
         default=None,
         help="MLX cache limit in GB"
     )
+    parser.add_argument(
+        "--redis-url",
+        type=str,
+        default=None,
+        help="Redis URL for distributed cache (e.g., redis://localhost:6379)"
+    )
     
     args = parser.parse_args()
     
@@ -922,7 +941,8 @@ def main():
             await run_orchestrator_setup(
                 model_path=args.model,
                 grpc_port=args.grpc_port,
-                http_port=args.http_port
+                http_port=args.http_port,
+                redis_url=args.redis_url
             )
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")

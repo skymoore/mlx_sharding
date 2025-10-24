@@ -82,21 +82,24 @@ def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = N
     return model
 
 
-def send_tensor(stub, tensor: mx.array):
+def send_tensor(stub, tensor: mx.array, session_id: str = None):
     """Send tensor, automatically chunking if needed."""
     tensor_bytes = tensor_to_bytes(tensor)
     message_size_mb = len(tensor_bytes) / (1024 * 1024)
     
     # Small tensor - send directly (backward compatible)
     if len(tensor_bytes) < CHUNK_SIZE_BYTES:
-        logger.info(f"📤 Sending tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB (direct)")
+        logger.info(f"📤 Sending tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB (direct), session={session_id}")
         
         tensor_message = mlx_tensor_pb2.Tensor(
             tensor_data=tensor_bytes,
             shape=list(tensor.shape),
             dtype=str(tensor.dtype)
         )
-        request = mlx_tensor_pb2.SendTensorRequest(full_tensor=tensor_message)
+        request = mlx_tensor_pb2.SendTensorRequest(
+            full_tensor=tensor_message,
+            session_id=session_id or ""
+        )
         
         try:
             response = stub.SendTensor(request)
@@ -126,7 +129,10 @@ def send_tensor(stub, tensor: mx.array):
                 shape=list(tensor.shape),
                 dtype=str(tensor.dtype)
             )
-            request = mlx_tensor_pb2.SendTensorRequest(chunked_tensor=chunk_message)
+            request = mlx_tensor_pb2.SendTensorRequest(
+                chunked_tensor=chunk_message,
+                session_id=session_id or ""
+            )
             
             try:
                 logger.info(f"  📤 Sending chunk {chunk_idx+1}/{total_chunks} ({chunk_size_mb:.2f}MB)")
@@ -287,7 +293,7 @@ def create_generate_step_with_grpc(grpc_stubs: List):
     return generate_step
 
 
-def create_coordinator_generate_step(grpc_stubs: List):
+def create_coordinator_generate_step(grpc_stubs: List, redis_cache=None):
     """
     Create generation function for coordinator-only mode (no local model).
     Coordinator sends tokens through pipeline and samples from returned logits.
@@ -301,6 +307,7 @@ def create_coordinator_generate_step(grpc_stubs: List):
     
     Args:
         grpc_stubs: Ordered list of gRPC stubs (by layer range)
+        redis_cache: Optional RedisKVCache instance for distributed cache
     
     Returns:
         Generator function that yields (token, logprobs) tuples
@@ -313,6 +320,10 @@ def create_coordinator_generate_step(grpc_stubs: List):
         top_p: float = 1.0,
         logit_bias: Optional[Dict[int, float]] = None,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+        
+        # Generate unique session ID for this generation
+        session_id = str(uuid.uuid4())
+        logger.info(f"🆔 Starting generation with session_id: {session_id}")
         
         # Reset all peer caches at start of generation
         for stub in grpc_stubs:
@@ -363,7 +374,7 @@ def create_coordinator_generate_step(grpc_stubs: List):
             tensor = y
             for i, stub in enumerate(grpc_stubs):
                 logger.info(f"  → Sending to peer {i}: shape={tensor.shape}, dtype={tensor.dtype}")
-                response = send_tensor(stub, tensor)
+                response = send_tensor(stub, tensor, session_id=session_id)
                 tensor = response_to_mlx_array(response)
                 if tensor is None:
                     raise ValueError(f"Peer {i} returned None")
@@ -392,10 +403,21 @@ def create_coordinator_generate_step(grpc_stubs: List):
         # Generate tokens
         y, logprobs = _step(y)
         mx.async_eval(y)
-        while True:
-            next_y, next_logprobs = _step(y)
-            mx.async_eval(next_y)
-            yield y.item(), logprobs
-            y, logprobs = next_y, next_logprobs
+        try:
+            while True:
+                next_y, next_logprobs = _step(y)
+                mx.async_eval(next_y)
+                yield y.item(), logprobs
+                y, logprobs = next_y, next_logprobs
+        finally:
+            # Cleanup: delete session cache from Redis when generation completes
+            if redis_cache is not None:
+                try:
+                    # We don't know num_layers here, so we'll use a large number
+                    # Redis will only delete keys that exist
+                    redis_cache.delete_session(session_id, num_layers=200)
+                    logger.info(f"🧹 Cleaned up Redis cache for session {session_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup Redis cache for session {session_id}: {e}")
     
     return generate_step

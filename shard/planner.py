@@ -261,10 +261,13 @@ class ShardingPlanner:
             
             shards.append(shard)
             
-            # Log the actual layers being loaded (end_layer is exclusive, so last layer is end_layer-1)
+            # Log the actual layers being loaded
+            # Model code uses: start_layer <= i < end_layer (exclusive end)
+            # So end_layer=68 means layers 0-67 are loaded
             actual_last_layer = end_layer_inclusive - 1
+            num_layers_in_shard = actual_last_layer - current_layer + 1
             lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
-            logger.info(f"Assigned layers {current_layer}-{actual_last_layer} (inclusive) to peer {peer.id[:8]} "
+            logger.info(f"Assigned layers {current_layer}-{actual_last_layer} ({num_layers_in_shard} layers) to peer {peer.id[:8]} "
                        f"({shard_memory:.1f}GB){lm_head_note}")
             
             current_layer = end_layer

@@ -7,9 +7,12 @@ import mlx.core as mx
 from mlx_lm.models.cache import KVCache
 import threading
 import time
+from typing import Optional
+from ..redis_cache import RedisKVCache
 
 MODEL = None
 CACHE = None
+REDIS_CACHE: Optional[RedisKVCache] = None
 
 # Global chunk buffer
 CHUNK_BUFFERS = {}  # Key: tensor_id, Value: {'chunks': {}, 'timestamp': float, 'total': int, 'shape': tuple, 'dtype': str}
@@ -47,6 +50,9 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             import time
             start_time = time.time()
             
+            # Extract session_id from request
+            session_id = request.session_id if request.session_id else None
+            
             # Check which type of tensor we received
             if request.HasField('full_tensor'):
                 # Original non-chunked path (backward compatible)
@@ -55,7 +61,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 tensor = mx.reshape(tensor, tensor_msg.shape)
                 recv_time = time.time() - start_time
                 tensor_size_mb = len(tensor_msg.tensor_data) / (1024 * 1024)
-                print(f"📥 Received full tensor: shape={tensor.shape}, size={tensor_size_mb:.2f}MB, time={recv_time:.2f}s")
+                print(f"📥 Received full tensor: shape={tensor.shape}, size={tensor_size_mb:.2f}MB, time={recv_time:.2f}s, session={session_id}")
                 
             elif request.HasField('chunked_tensor'):
                 # NEW: Chunked tensor path
@@ -65,7 +71,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 total_chunks = chunk.total_chunks
                 chunk_size_mb = len(chunk.chunk_data) / (1024 * 1024)
                 
-                print(f"📥 Received chunk {chunk_idx+1}/{total_chunks} for {tensor_id[:8]}... ({chunk_size_mb:.2f}MB)")
+                print(f"📥 Received chunk {chunk_idx+1}/{total_chunks} for {tensor_id[:8]}... ({chunk_size_mb:.2f}MB), session={session_id}")
                 
                 with CHUNK_BUFFER_LOCK:
                     # Initialize buffer for this tensor if first chunk
@@ -119,10 +125,32 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             
             # Process the tensor (same for both paths)
             if MODEL is not None:
+                # Load cache from Redis if session_id provided and Redis is available
+                cache_to_use = CACHE
+                if session_id and REDIS_CACHE is not None:
+                    try:
+                        num_layers = MODEL.args.num_hidden_layers
+                        redis_cache = REDIS_CACHE.get_cache(session_id, num_layers)
+                        if redis_cache is not None:
+                            cache_to_use = redis_cache
+                            print(f"📦 Loaded cache from Redis for session {session_id}")
+                        else:
+                            print(f"📦 No cache in Redis for session {session_id}, using local cache")
+                    except Exception as e:
+                        print(f"⚠️  Failed to load cache from Redis: {e}, using local cache")
+                
                 process_start = time.time()
-                processed_tensor = MODEL(tensor, cache=CACHE)
+                processed_tensor = MODEL(tensor, cache=cache_to_use)
                 process_time = time.time() - process_start
                 print(f"⚙️  Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
+                
+                # Save cache to Redis if session_id provided and Redis is available
+                if session_id and REDIS_CACHE is not None and cache_to_use is not None:
+                    try:
+                        REDIS_CACHE.set_cache(session_id, cache_to_use)
+                        print(f"💾 Saved cache to Redis for session {session_id}")
+                    except Exception as e:
+                        print(f"⚠️  Failed to save cache to Redis: {e}")
                 
                 # Only reduce to last token if this is the last peer (has lm_head)
                 # Intermediate peers need to pass full sequence for KV cache building
@@ -183,8 +211,8 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
             )
 
 
-def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None):
-    global MODEL
+def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None, redis_url=None):
+    global MODEL, REDIS_CACHE
     
     # Use preloaded model if provided (V2 architecture), otherwise load it (V1 architecture)
     if preloaded_model is not None:
@@ -202,6 +230,19 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051, preloaded_mo
         print(f"🔍 end_layer: {MODEL.end_layer}")
     if hasattr(MODEL, 'args'):
         print(f"🔍 num_hidden_layers: {MODEL.args.num_hidden_layers}")
+    
+    # Initialize Redis cache if URL provided
+    if redis_url:
+        try:
+            REDIS_CACHE = RedisKVCache(redis_url=redis_url)
+            print(f"✅ Redis cache initialized: {redis_url}")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize Redis cache: {e}")
+            print(f"⚠️  Continuing without Redis cache")
+            REDIS_CACHE = None
+    else:
+        print(f"ℹ️  No Redis URL provided, using local cache only")
+        REDIS_CACHE = None
     
     reset_cache()
     

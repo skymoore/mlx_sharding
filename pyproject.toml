@@ -20,6 +20,8 @@ dependencies = [
     "aiohttp (>=3.13.1,<4.0.0)",
     "fastapi (>=0.120.0,<0.121.0)",
     "uvicorn (>=0.38.0,<0.39.0)",
+    "redis (>=5.0.0,<6.0.0)",
+    "msgpack (>=1.0.0,<2.0.0)",
 ]
 
 [project.urls]

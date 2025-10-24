@@ -30,6 +30,7 @@ message SendTensorRequest {
     Tensor full_tensor = 1;        // For small tensors (< 10MB)
     TensorChunk chunked_tensor = 2; // For large tensors (>= 10MB)
   }
+  string session_id = 3;           // Session ID for cache synchronization
 }
 
 message TensorResponse {

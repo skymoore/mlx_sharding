@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import mlx_tensor_pb2 as mlx__tensor__pb2
+import mlx_tensor_pb2 as mlx__tensor__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__

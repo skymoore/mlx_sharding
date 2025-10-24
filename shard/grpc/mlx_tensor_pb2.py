@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10mlx_tensor.proto\x12\tmlxtensor\";\n\x06Tensor\x12\x13\n\x0btensor_data\x18\x01 \x01(\x0c\x12\r\n\x05shape\x18\x02 \x03(\x05\x12\r\n\x05\x64type\x18\x03 \x01(\t\"}\n\x0bTensorChunk\x12\x11\n\ttensor_id\x18\x01 \x01(\t\x12\x13\n\x0b\x63hunk_index\x18\x02 \x01(\x05\x12\x14\n\x0ctotal_chunks\x18\x03 \x01(\x05\x12\x12\n\nchunk_data\x18\x04 \x01(\x0c\x12\r\n\x05shape\x18\x05 \x03(\x05\x12\r\n\x05\x64type\x18\x06 \x01(\t\"\x81\x01\n\x11SendTensorRequest\x12(\n\x0b\x66ull_tensor\x18\x01 \x01(\x0b\x32\x11.mlxtensor.TensorH\x00\x12\x30\n\x0e\x63hunked_tensor\x18\x02 \x01(\x0b\x32\x16.mlxtensor.TensorChunkH\x00\x42\x10\n\x0etensor_payload\"U\n\x0eTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12!\n\x06tensor\x18\x03 \x01(\x0b\x32\x11.mlxtensor.Tensor\"\x13\n\x11ResetCacheRequest\"6\n\x12ResetCacheResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xa8\x01\n\x10MLXTensorService\x12G\n\nSendTensor\x12\x1c.mlxtensor.SendTensorRequest\x1a\x19.mlxtensor.TensorResponse\"\x00\x12K\n\nResetCache\x12\x1c.mlxtensor.ResetCacheRequest\x1a\x1d.mlxtensor.ResetCacheResponse\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10mlx_tensor.proto\x12\tmlxtensor\";\n\x06Tensor\x12\x13\n\x0btensor_data\x18\x01 \x01(\x0c\x12\r\n\x05shape\x18\x02 \x03(\x05\x12\r\n\x05\x64type\x18\x03 \x01(\t\"}\n\x0bTensorChunk\x12\x11\n\ttensor_id\x18\x01 \x01(\t\x12\x13\n\x0b\x63hunk_index\x18\x02 \x01(\x05\x12\x14\n\x0ctotal_chunks\x18\x03 \x01(\x05\x12\x12\n\nchunk_data\x18\x04 \x01(\x0c\x12\r\n\x05shape\x18\x05 \x03(\x05\x12\r\n\x05\x64type\x18\x06 \x01(\t\"\x95\x01\n\x11SendTensorRequest\x12(\n\x0b\x66ull_tensor\x18\x01 \x01(\x0b\x32\x11.mlxtensor.TensorH\x00\x12\x30\n\x0e\x63hunked_tensor\x18\x02 \x01(\x0b\x32\x16.mlxtensor.TensorChunkH\x00\x12\x12\n\nsession_id\x18\x03 \x01(\tB\x10\n\x0etensor_payload\"U\n\x0eTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12!\n\x06tensor\x18\x03 \x01(\x0b\x32\x11.mlxtensor.Tensor\"\x13\n\x11ResetCacheRequest\"6\n\x12ResetCacheResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xa8\x01\n\x10MLXTensorService\x12G\n\nSendTensor\x12\x1c.mlxtensor.SendTensorRequest\x1a\x19.mlxtensor.TensorResponse\"\x00\x12K\n\nResetCache\x12\x1c.mlxtensor.ResetCacheRequest\x1a\x1d.mlxtensor.ResetCacheResponse\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,13 +36,13 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_TENSORCHUNK']._serialized_start=92
   _globals['_TENSORCHUNK']._serialized_end=217
   _globals['_SENDTENSORREQUEST']._serialized_start=220
-  _globals['_SENDTENSORREQUEST']._serialized_end=349
-  _globals['_TENSORRESPONSE']._serialized_start=351
-  _globals['_TENSORRESPONSE']._serialized_end=436
-  _globals['_RESETCACHEREQUEST']._serialized_start=438
-  _globals['_RESETCACHEREQUEST']._serialized_end=457
-  _globals['_RESETCACHERESPONSE']._serialized_start=459
-  _globals['_RESETCACHERESPONSE']._serialized_end=513
-  _globals['_MLXTENSORSERVICE']._serialized_start=516
-  _globals['_MLXTENSORSERVICE']._serialized_end=684
+  _globals['_SENDTENSORREQUEST']._serialized_end=369
+  _globals['_TENSORRESPONSE']._serialized_start=371
+  _globals['_TENSORRESPONSE']._serialized_end=456
+  _globals['_RESETCACHEREQUEST']._serialized_start=458
+  _globals['_RESETCACHEREQUEST']._serialized_end=477
+  _globals['_RESETCACHERESPONSE']._serialized_start=479
+  _globals['_RESETCACHERESPONSE']._serialized_end=533
+  _globals['_MLXTENSORSERVICE']._serialized_start=536
+  _globals['_MLXTENSORSERVICE']._serialized_end=704
 # @@protoc_insertion_point(module_scope)
