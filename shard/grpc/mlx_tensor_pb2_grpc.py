@@ -3,12 +3,10 @@
 import grpc
 import warnings
 
-from . import mlx_tensor_pb2 as mlx__tensor__pb2
+import mlx_tensor_pb2 as mlx__tensor__pb2
 
-GRPC_GENERATED_VERSION = '1.64.1'
+GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
-EXPECTED_ERROR_RELEASE = '1.65.0'
-SCHEDULED_RELEASE_DATE = 'June 25, 2024'
 _version_not_supported = False
 
 try:
@@ -18,15 +16,12 @@ except ImportError:
     _version_not_supported = True
 
 if _version_not_supported:
-    warnings.warn(
+    raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in mlx_tensor_pb2_grpc.py depends on'
+        + ' but the generated code in mlx_tensor_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
-        + f' This warning will become an error in {EXPECTED_ERROR_RELEASE},'
-        + f' scheduled for release on {SCHEDULED_RELEASE_DATE}.',
-        RuntimeWarning
     )
 
 
@@ -41,7 +36,7 @@ class MLXTensorServiceStub(object):
         """
         self.SendTensor = channel.unary_unary(
                 '/mlxtensor.MLXTensorService/SendTensor',
-                request_serializer=mlx__tensor__pb2.Tensor.SerializeToString,
+                request_serializer=mlx__tensor__pb2.SendTensorRequest.SerializeToString,
                 response_deserializer=mlx__tensor__pb2.TensorResponse.FromString,
                 _registered_method=True)
         self.ResetCache = channel.unary_unary(
@@ -71,7 +66,7 @@ def add_MLXTensorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendTensor': grpc.unary_unary_rpc_method_handler(
                     servicer.SendTensor,
-                    request_deserializer=mlx__tensor__pb2.Tensor.FromString,
+                    request_deserializer=mlx__tensor__pb2.SendTensorRequest.FromString,
                     response_serializer=mlx__tensor__pb2.TensorResponse.SerializeToString,
             ),
             'ResetCache': grpc.unary_unary_rpc_method_handler(
@@ -105,7 +100,7 @@ class MLXTensorService(object):
             request,
             target,
             '/mlxtensor.MLXTensorService/SendTensor',
-            mlx__tensor__pb2.Tensor.SerializeToString,
+            mlx__tensor__pb2.SendTensorRequest.SerializeToString,
             mlx__tensor__pb2.TensorResponse.FromString,
             options,
             channel_credentials,

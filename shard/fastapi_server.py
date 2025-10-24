@@ -183,6 +183,21 @@ async def list_models_openwebui() -> OpenWebUIModelList:
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """Handle chat completion requests with tool calling support."""
+    import json
+    
+    # Pretty print request
+    logging.info("=" * 80)
+    logging.info("📥 CHAT COMPLETION REQUEST")
+    logging.info(f"Model: {request.model}")
+    logging.info(f"Messages: {len(request.messages)}")
+    logging.info(f"Stream: {request.stream}")
+    logging.info(f"Max tokens: {request.max_tokens}")
+    logging.info(f"Tools: {len(request.tools) if request.tools else 0}")
+    for i, msg in enumerate(request.messages):
+        content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+        logging.info(f"  [{i}] {msg.role}: {content_preview}")
+    logging.info("=" * 80)
+    
     try:
         # Prepare messages
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -340,6 +355,20 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
         ]
         # When tool calls present, finish_reason should be "tool_calls"
         response["choices"][0]["finish_reason"] = "tool_calls"
+    
+    # Pretty print response
+    logging.info("=" * 80)
+    logging.info("📤 CHAT COMPLETION RESPONSE")
+    logging.info(f"Finish reason: {response['choices'][0]['finish_reason']}")
+    content = response['choices'][0]['message']['content']
+    content_preview = content[:200] + "..." if len(content) > 200 else content
+    logging.info(f"Content: {content_preview}")
+    if 'tool_calls' in response['choices'][0]['message']:
+        logging.info(f"Tool calls: {len(response['choices'][0]['message']['tool_calls'])}")
+        for tc in response['choices'][0]['message']['tool_calls']:
+            logging.info(f"  - {tc['function']['name']}")
+    logging.info(f"Tokens: {response['usage']['total_tokens']}")
+    logging.info("=" * 80)
     
     return response
 

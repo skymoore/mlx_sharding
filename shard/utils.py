@@ -10,10 +10,15 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.sample_utils import apply_top_p, make_logits_processors
 from mlx_lm.utils import hf_repo_to_path
 import numpy as np
+import uuid
 from .grpc import mlx_tensor_pb2
 
 # Setup logger for this module
 logger = logging.getLogger(__name__)
+
+# Configuration
+CHUNK_SIZE_MB = 10
+CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
 MODEL_REMAPPING = {
     "mistral": "llama",  # mistral is compatible with llama
@@ -78,20 +83,63 @@ def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = N
 
 
 def send_tensor(stub, tensor: mx.array):
+    """Send tensor, automatically chunking if needed."""
     tensor_bytes = tensor_to_bytes(tensor)
     message_size_mb = len(tensor_bytes) / (1024 * 1024)
-    logger.info(f"Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, size={message_size_mb:.2f}MB")
     
-    tensor_message = mlx_tensor_pb2.Tensor(
-        tensor_data=tensor_bytes, shape=list(tensor.shape), dtype=str(tensor.dtype)
-    )
+    # Small tensor - send directly (backward compatible)
+    if len(tensor_bytes) < CHUNK_SIZE_BYTES:
+        logger.info(f"📤 Sending tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB (direct)")
+        
+        tensor_message = mlx_tensor_pb2.Tensor(
+            tensor_data=tensor_bytes,
+            shape=list(tensor.shape),
+            dtype=str(tensor.dtype)
+        )
+        request = mlx_tensor_pb2.SendTensorRequest(full_tensor=tensor_message)
+        
+        try:
+            response = stub.SendTensor(request)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to send {message_size_mb:.2f}MB tensor: {e}")
+            raise
     
-    try:
-        response = stub.SendTensor(tensor_message)
-        return response
-    except Exception as e:
-        logger.error(f"Failed to send {message_size_mb:.2f}MB tensor: {e}")
-        raise
+    # Large tensor - chunk it
+    else:
+        tensor_id = str(uuid.uuid4())
+        total_chunks = (len(tensor_bytes) + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
+        
+        logger.info(f"📦 Chunking tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB into {total_chunks} chunks")
+        
+        for chunk_idx in range(total_chunks):
+            start = chunk_idx * CHUNK_SIZE_BYTES
+            end = min(start + CHUNK_SIZE_BYTES, len(tensor_bytes))
+            chunk_data = tensor_bytes[start:end]
+            chunk_size_mb = len(chunk_data) / (1024 * 1024)
+            
+            chunk_message = mlx_tensor_pb2.TensorChunk(
+                tensor_id=tensor_id,
+                chunk_index=chunk_idx,
+                total_chunks=total_chunks,
+                chunk_data=chunk_data,
+                shape=list(tensor.shape),
+                dtype=str(tensor.dtype)
+            )
+            request = mlx_tensor_pb2.SendTensorRequest(chunked_tensor=chunk_message)
+            
+            try:
+                logger.info(f"  📤 Sending chunk {chunk_idx+1}/{total_chunks} ({chunk_size_mb:.2f}MB)")
+                response = stub.SendTensor(request)
+                
+                # Only the last chunk returns the processed tensor
+                if chunk_idx == total_chunks - 1:
+                    logger.info(f"✅ All chunks sent successfully")
+                    return response
+                    
+            except Exception as e:
+                logger.error(f"Failed to send chunk {chunk_idx+1}/{total_chunks}: {e}")
+                raise
 
 
 def response_to_mlx_array(response):

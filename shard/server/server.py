@@ -5,9 +5,32 @@ from ..grpc import mlx_tensor_pb2, mlx_tensor_pb2_grpc
 from ..utils import bytes_to_tensor, load_model, tensor_to_bytes
 import mlx.core as mx
 from mlx_lm.models.cache import KVCache
+import threading
+import time
 
 MODEL = None
 CACHE = None
+
+# Global chunk buffer
+CHUNK_BUFFERS = {}  # Key: tensor_id, Value: {'chunks': {}, 'timestamp': float, 'total': int, 'shape': tuple, 'dtype': str}
+CHUNK_BUFFER_LOCK = threading.Lock()
+CHUNK_TIMEOUT_SECONDS = 60
+
+def cleanup_stale_chunks():
+    """Background task to clean up incomplete chunk transfers."""
+    while True:
+        time.sleep(30)  # Run every 30 seconds
+        current_time = time.time()
+        
+        with CHUNK_BUFFER_LOCK:
+            stale_ids = [
+                tid for tid, data in CHUNK_BUFFERS.items()
+                if current_time - data['timestamp'] > CHUNK_TIMEOUT_SECONDS
+            ]
+            
+            for tid in stale_ids:
+                print(f"🧹 Cleaning up stale chunks for tensor_id: {tid}")
+                del CHUNK_BUFFERS[tid]
 
 def reset_cache():
     global CACHE
@@ -21,26 +44,97 @@ def reset_cache():
 class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
     def SendTensor(self, request, context):
         try:
-            print("Received tensor request")
-            tensor = bytes_to_tensor(request.tensor_data, request.dtype)
-            tensor = mx.reshape(tensor, request.shape)
-            print(f"Received tensor with shape: {
-                  tensor.shape} and dtype: {tensor.dtype}")
-
+            import time
+            start_time = time.time()
+            
+            # Check which type of tensor we received
+            if request.HasField('full_tensor'):
+                # Original non-chunked path (backward compatible)
+                tensor_msg = request.full_tensor
+                tensor = bytes_to_tensor(tensor_msg.tensor_data, tensor_msg.dtype)
+                tensor = mx.reshape(tensor, tensor_msg.shape)
+                recv_time = time.time() - start_time
+                tensor_size_mb = len(tensor_msg.tensor_data) / (1024 * 1024)
+                print(f"📥 Received full tensor: shape={tensor.shape}, size={tensor_size_mb:.2f}MB, time={recv_time:.2f}s")
+                
+            elif request.HasField('chunked_tensor'):
+                # NEW: Chunked tensor path
+                chunk = request.chunked_tensor
+                tensor_id = chunk.tensor_id
+                chunk_idx = chunk.chunk_index
+                total_chunks = chunk.total_chunks
+                chunk_size_mb = len(chunk.chunk_data) / (1024 * 1024)
+                
+                print(f"📥 Received chunk {chunk_idx+1}/{total_chunks} for {tensor_id[:8]}... ({chunk_size_mb:.2f}MB)")
+                
+                with CHUNK_BUFFER_LOCK:
+                    # Initialize buffer for this tensor if first chunk
+                    if tensor_id not in CHUNK_BUFFERS:
+                        CHUNK_BUFFERS[tensor_id] = {
+                            'chunks': {},
+                            'timestamp': time.time(),
+                            'total': total_chunks,
+                            'shape': tuple(chunk.shape),
+                            'dtype': chunk.dtype
+                        }
+                    
+                    # Store this chunk
+                    CHUNK_BUFFERS[tensor_id]['chunks'][chunk_idx] = chunk.chunk_data
+                    CHUNK_BUFFERS[tensor_id]['timestamp'] = time.time()  # Update timestamp
+                    
+                    # Check if we have all chunks
+                    if len(CHUNK_BUFFERS[tensor_id]['chunks']) == total_chunks:
+                        print(f"✅ All {total_chunks} chunks received, reassembling...")
+                        
+                        # Reassemble in order
+                        full_data = b''.join([
+                            CHUNK_BUFFERS[tensor_id]['chunks'][i]
+                            for i in range(total_chunks)
+                        ])
+                        
+                        # Clean up buffer
+                        shape = CHUNK_BUFFERS[tensor_id]['shape']
+                        dtype = CHUNK_BUFFERS[tensor_id]['dtype']
+                        del CHUNK_BUFFERS[tensor_id]
+                        
+                        # Convert to tensor
+                        tensor = bytes_to_tensor(full_data, dtype)
+                        tensor = mx.reshape(tensor, shape)
+                        total_size_mb = len(full_data) / (1024 * 1024)
+                        reassemble_time = time.time() - start_time
+                        print(f"🔧 Reassembled tensor: shape={tensor.shape}, size={total_size_mb:.2f}MB, time={reassemble_time:.2f}s")
+                    else:
+                        # Not all chunks received yet, return success but no tensor
+                        return mlx_tensor_pb2.TensorResponse(
+                            success=True,
+                            message=f"Chunk {chunk_idx+1}/{total_chunks} received",
+                            tensor=None
+                        )
+            else:
+                return mlx_tensor_pb2.TensorResponse(
+                    success=False,
+                    message="Invalid request: no tensor payload",
+                    tensor=None
+                )
+            
+            # Process the tensor (same for both paths)
             if MODEL is not None:
+                process_start = time.time()
                 processed_tensor = MODEL(tensor, cache=CACHE)
-                print(f"Processed tensor with shape: {
-                      processed_tensor.shape} and dtype: {processed_tensor.dtype}")
+                process_time = time.time() - process_start
+                print(f"⚙️  Processed: shape={processed_tensor.shape}, time={process_time:.2f}s")
                 
-                # CRITICAL FIX: Only return the last token's logits to avoid huge messages
-                # For generation, we only need logits for the last position
+                # Only return last token's logits
                 if len(processed_tensor.shape) == 3 and processed_tensor.shape[1] > 1:
-                    # Shape is (batch, seq_len, vocab_size)
-                    # Only keep last position: (batch, 1, vocab_size)
                     processed_tensor = processed_tensor[:, -1:, :]
-                    print(f"Reduced to last token only: {processed_tensor.shape}")
+                    print(f"✂️  Reduced to last token: {processed_tensor.shape}")
                 
+                serialize_start = time.time()
                 processed_bytes = tensor_to_bytes(processed_tensor)
+                serialize_time = time.time() - serialize_start
+                response_size_mb = len(processed_bytes) / (1024 * 1024)
+                print(f"📤 Sending response: size={response_size_mb:.2f}MB, time={serialize_time:.2f}s")
+                
                 response_tensor = mlx_tensor_pb2.Tensor(
                     tensor_data=processed_bytes,
                     shape=list(processed_tensor.shape),
@@ -49,16 +143,20 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 return mlx_tensor_pb2.TensorResponse(
                     success=True,
                     message="Tensor processed successfully",
-                    tensor=response_tensor)
+                    tensor=response_tensor
+                )
             else:
                 return mlx_tensor_pb2.TensorResponse(
                     success=False,
                     message="Model not loaded",
                     tensor=None
                 )
+                
         except Exception as e:
-            print(f"Error processing tensor: {e}")
-            return mlx_tensor_pb2.TensorResponse(success=False, message=str(e))
+            print(f"❌ Error processing tensor: {e}")
+            import traceback
+            traceback.print_exc()
+            return mlx_tensor_pb2.TensorResponse(success=False, message=str(e), tensor=None)
 
     def ResetCache(self, request, context):
         try:
@@ -79,6 +177,12 @@ def serve(model_path, start_layer=None, end_layer=None, port=50051):
     global MODEL
     MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
     reset_cache()
+    
+    # Start cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_stale_chunks, daemon=True)
+    cleanup_thread.start()
+    print("🧹 Started chunk cleanup thread")
+    
     server_options = [
         ('grpc.max_metadata_size', 64 * 1024 * 1024),  # 64MB metadata
         ('grpc.max_send_message_length', -1),  # Unlimited send
