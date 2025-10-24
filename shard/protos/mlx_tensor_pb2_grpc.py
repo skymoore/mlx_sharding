@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import mlx_tensor_pb2 as mlx__tensor__pb2
+from shard.protos import mlx_tensor_pb2 as shard_dot_protos_dot_mlx__tensor__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in mlx_tensor_pb2_grpc.py depends on'
+        + ' but the generated code in shard/protos/mlx_tensor_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,13 +36,13 @@ class MLXTensorServiceStub(object):
         """
         self.SendTensor = channel.unary_unary(
                 '/mlxtensor.MLXTensorService/SendTensor',
-                request_serializer=mlx__tensor__pb2.SendTensorRequest.SerializeToString,
-                response_deserializer=mlx__tensor__pb2.TensorResponse.FromString,
+                request_serializer=shard_dot_protos_dot_mlx__tensor__pb2.SendTensorRequest.SerializeToString,
+                response_deserializer=shard_dot_protos_dot_mlx__tensor__pb2.TensorResponse.FromString,
                 _registered_method=True)
         self.ResetCache = channel.unary_unary(
                 '/mlxtensor.MLXTensorService/ResetCache',
-                request_serializer=mlx__tensor__pb2.ResetCacheRequest.SerializeToString,
-                response_deserializer=mlx__tensor__pb2.ResetCacheResponse.FromString,
+                request_serializer=shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheRequest.SerializeToString,
+                response_deserializer=shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheResponse.FromString,
                 _registered_method=True)
 
 
@@ -66,13 +66,13 @@ def add_MLXTensorServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'SendTensor': grpc.unary_unary_rpc_method_handler(
                     servicer.SendTensor,
-                    request_deserializer=mlx__tensor__pb2.SendTensorRequest.FromString,
-                    response_serializer=mlx__tensor__pb2.TensorResponse.SerializeToString,
+                    request_deserializer=shard_dot_protos_dot_mlx__tensor__pb2.SendTensorRequest.FromString,
+                    response_serializer=shard_dot_protos_dot_mlx__tensor__pb2.TensorResponse.SerializeToString,
             ),
             'ResetCache': grpc.unary_unary_rpc_method_handler(
                     servicer.ResetCache,
-                    request_deserializer=mlx__tensor__pb2.ResetCacheRequest.FromString,
-                    response_serializer=mlx__tensor__pb2.ResetCacheResponse.SerializeToString,
+                    request_deserializer=shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheRequest.FromString,
+                    response_serializer=shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -100,8 +100,8 @@ class MLXTensorService(object):
             request,
             target,
             '/mlxtensor.MLXTensorService/SendTensor',
-            mlx__tensor__pb2.SendTensorRequest.SerializeToString,
-            mlx__tensor__pb2.TensorResponse.FromString,
+            shard_dot_protos_dot_mlx__tensor__pb2.SendTensorRequest.SerializeToString,
+            shard_dot_protos_dot_mlx__tensor__pb2.TensorResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -127,8 +127,8 @@ class MLXTensorService(object):
             request,
             target,
             '/mlxtensor.MLXTensorService/ResetCache',
-            mlx__tensor__pb2.ResetCacheRequest.SerializeToString,
-            mlx__tensor__pb2.ResetCacheResponse.FromString,
+            shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheRequest.SerializeToString,
+            shard_dot_protos_dot_mlx__tensor__pb2.ResetCacheResponse.FromString,
             options,
             channel_credentials,
             insecure,
