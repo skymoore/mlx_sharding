@@ -57,25 +57,33 @@ class RedisKVCache:
         """Generate Redis key for a specific layer's cache."""
         return f"mlx:session:{session_id}:layer:{layer_idx}:cache"
     
-    def _serialize_cache(self, cache: Tuple[mx.array, mx.array]) -> bytes:
+    def _serialize_cache(self, cache) -> bytes:
         """
-        Serialize KV cache tuple to bytes using msgpack.
+        Serialize KV cache to bytes using msgpack.
         
         Args:
-            cache: Tuple of (keys, values) as mx.array
+            cache: Either a tuple of (keys, values) or a KVCache object with .state property
             
         Returns:
             Serialized bytes
         """
-        keys, values = cache
+        # Handle KVCache objects (from mlx_lm.models.cache)
+        if hasattr(cache, 'state'):
+            keys, values = cache.state
+        # Handle raw tuples
+        elif isinstance(cache, tuple) and len(cache) == 2:
+            keys, values = cache
+        else:
+            raise ValueError(f"Unsupported cache type: {type(cache)}")
+        
         data = {
             "keys": {
-                "data": keys.tobytes(),
+                "data": bytes(memoryview(keys)),
                 "shape": list(keys.shape),
                 "dtype": str(keys.dtype)
             },
             "values": {
-                "data": values.tobytes(),
+                "data": bytes(memoryview(values)),
                 "shape": list(values.shape),
                 "dtype": str(values.dtype)
             }
@@ -92,21 +100,35 @@ class RedisKVCache:
         Returns:
             Tuple of (keys, values) as mx.array
         """
+        import numpy as np
         unpacked = msgpack.unpackb(data, raw=False)
         
         keys_data = unpacked["keys"]
-        keys = mx.frombuffer(
-            keys_data["data"],
-            dtype=getattr(mx, keys_data["dtype"].replace("mlx.core.", ""))
-        ).reshape(keys_data["shape"])
+        # Convert bytes to numpy array first, then to MLX array
+        dtype_str = keys_data["dtype"].replace("mlx.core.", "")
+        mx_dtype = getattr(mx, dtype_str)
+        np_array_keys = np.frombuffer(keys_data["data"], dtype=self._mx_to_np_dtype(dtype_str))
+        keys = mx.array(np_array_keys, dtype=mx_dtype).reshape(keys_data["shape"])
         
         values_data = unpacked["values"]
-        values = mx.frombuffer(
-            values_data["data"],
-            dtype=getattr(mx, values_data["dtype"].replace("mlx.core.", ""))
-        ).reshape(values_data["shape"])
+        dtype_str = values_data["dtype"].replace("mlx.core.", "")
+        mx_dtype = getattr(mx, dtype_str)
+        np_array_values = np.frombuffer(values_data["data"], dtype=self._mx_to_np_dtype(dtype_str))
+        values = mx.array(np_array_values, dtype=mx_dtype).reshape(values_data["shape"])
         
         return (keys, values)
+    
+    def _mx_to_np_dtype(self, mx_dtype_str: str):
+        """Convert MLX dtype string to numpy dtype."""
+        import numpy as np
+        dtype_map = {
+            "float32": np.float32,
+            "float16": np.float16,
+            "bfloat16": np.uint16,  # bfloat16 stored as uint16
+            "int32": np.int32,
+            "int64": np.int64,
+        }
+        return dtype_map.get(mx_dtype_str, np.float32)
     
     def get_cache(
         self,
@@ -114,16 +136,18 @@ class RedisKVCache:
         num_layers: int
     ) -> Optional[list]:
         """
-        Read cache for all layers from Redis.
+        Read cache for all layers from Redis and reconstruct KVCache objects.
         
         Args:
             session_id: Unique session identifier
             num_layers: Number of layers to read cache for
             
         Returns:
-            List of cache tuples (one per layer), or None if not found
+            List of KVCache objects (one per layer), or None if not found
         """
         try:
+            from mlx_lm.models.cache import KVCache
+            
             if self.enable_pipelining:
                 # Use pipeline for batch read
                 pipe = self.client.pipeline()
@@ -143,15 +167,19 @@ class RedisKVCache:
                 logger.debug(f"No cache found for session {session_id}")
                 return None
             
-            # Deserialize cache entries
+            # Deserialize cache entries and create KVCache objects
             cache = []
             for layer_idx, data in enumerate(results):
                 if data is not None:
-                    cache.append(self._deserialize_cache(data))
+                    keys, values = self._deserialize_cache(data)
+                    # Create KVCache object and set its state
+                    kv_cache = KVCache()
+                    kv_cache.state = (keys, values)
+                    cache.append(kv_cache)
                 else:
-                    # Missing layer cache - this shouldn't happen in normal operation
+                    # Missing layer cache - create empty KVCache
                     logger.warning(f"Missing cache for session {session_id} layer {layer_idx}")
-                    cache.append(None)
+                    cache.append(KVCache())
             
             logger.debug(f"Retrieved cache for session {session_id} ({num_layers} layers)")
             return cache
