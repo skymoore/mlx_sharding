@@ -255,7 +255,8 @@ class ShardingPlanner:
             
             shards.append(shard)
             
-            logger.info(f"Assigned layers {current_layer}-{end_layer} to peer {peer.id[:8]} "
+            # end_layer is exclusive (like Python range), so actual last layer is end_layer-1
+            logger.info(f"Assigned layers {current_layer}-{end_layer-1} (inclusive) to peer {peer.id[:8]} "
                        f"({shard_memory:.1f}GB)")
             
             current_layer = end_layer
