@@ -69,12 +69,16 @@ class RedisKVCache:
         """
         # Handle KVCache objects (from mlx_lm.models.cache)
         if hasattr(cache, 'state'):
+            logger.debug(f"Serializing KVCache object with state property")
             keys, values = cache.state
         # Handle raw tuples
         elif isinstance(cache, tuple) and len(cache) == 2:
+            logger.debug(f"Serializing raw tuple cache")
             keys, values = cache
         else:
-            raise ValueError(f"Unsupported cache type: {type(cache)}")
+            error_msg = f"Unsupported cache type: {type(cache)}, has_state={hasattr(cache, 'state')}, is_tuple={isinstance(cache, tuple)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         data = {
             "keys": {
@@ -209,11 +213,13 @@ class RedisKVCache:
             ttl = self.default_ttl
         
         try:
+            logger.debug(f"set_cache called with cache type: {type(cache)}, length: {len(cache) if hasattr(cache, '__len__') else 'N/A'}")
             if self.enable_pipelining:
                 # Use pipeline for batch write
                 pipe = self.client.pipeline()
                 for layer_idx, layer_cache in enumerate(cache):
                     if layer_cache is not None:
+                        logger.debug(f"  Layer {layer_idx}: type={type(layer_cache)}, has_state={hasattr(layer_cache, 'state')}")
                         key = self._make_key(session_id, layer_idx)
                         data = self._serialize_cache(layer_cache)
                         pipe.setex(key, ttl, data)
@@ -222,6 +228,7 @@ class RedisKVCache:
                 # Sequential writes
                 for layer_idx, layer_cache in enumerate(cache):
                     if layer_cache is not None:
+                        logger.debug(f"  Layer {layer_idx}: type={type(layer_cache)}, has_state={hasattr(layer_cache, 'state')}")
                         key = self._make_key(session_id, layer_idx)
                         data = self._serialize_cache(layer_cache)
                         self.client.setex(key, ttl, data)
@@ -231,6 +238,8 @@ class RedisKVCache:
             
         except Exception as e:
             logger.error(f"Failed to write cache to Redis: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     def delete_session(self, session_id: str, num_layers: int) -> bool:
