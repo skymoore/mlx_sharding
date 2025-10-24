@@ -129,15 +129,25 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 cache_to_use = CACHE
                 if session_id and REDIS_CACHE is not None:
                     try:
-                        num_layers = MODEL.args.num_hidden_layers
-                        redis_cache = REDIS_CACHE.get_cache(session_id, num_layers)
+                        # Get this peer's global layer range
+                        start_layer = MODEL.start_layer
+                        end_layer = MODEL.end_layer + 1  # Exclusive
+                        
+                        redis_cache = REDIS_CACHE.get_cache(session_id, start_layer, end_layer)
                         if redis_cache is not None:
-                            cache_to_use = redis_cache
-                            print(f"📦 Loaded cache from Redis for session {session_id}")
+                            # Validate cache size matches expected layer count
+                            expected_layers = end_layer - start_layer
+                            if len(redis_cache) != expected_layers:
+                                print(f"⚠️  Cache size mismatch: got {len(redis_cache)}, expected {expected_layers}")
+                            else:
+                                cache_to_use = redis_cache
+                                print(f"📦 Loaded cache from Redis (layers {start_layer}-{end_layer-1})")
                         else:
-                            print(f"📦 No cache in Redis for session {session_id}, using local cache")
+                            print(f"📦 No cache in Redis (layers {start_layer}-{end_layer-1}), using local cache")
                     except Exception as e:
                         print(f"⚠️  Failed to load cache from Redis: {e}, using local cache")
+                        import traceback
+                        traceback.print_exc()
                 
                 process_start = time.time()
                 processed_tensor = MODEL(tensor, cache=cache_to_use)
@@ -147,10 +157,21 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 # Save cache to Redis if session_id provided and Redis is available
                 if session_id and REDIS_CACHE is not None and cache_to_use is not None:
                     try:
-                        REDIS_CACHE.set_cache(session_id, cache_to_use)
-                        print(f"💾 Saved cache to Redis for session {session_id}")
+                        # Get this peer's global layer range
+                        start_layer = MODEL.start_layer
+                        end_layer = MODEL.end_layer + 1  # Exclusive
+                        expected_layers = end_layer - start_layer
+                        
+                        # Validate cache size before saving
+                        if len(cache_to_use) != expected_layers:
+                            print(f"⚠️  Cache size mismatch before save: got {len(cache_to_use)}, expected {expected_layers}")
+                        
+                        REDIS_CACHE.set_cache(session_id, cache_to_use, start_layer)
+                        print(f"💾 Saved cache to Redis (layers {start_layer}-{end_layer-1})")
                     except Exception as e:
                         print(f"⚠️  Failed to save cache to Redis: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 # Only reduce to last token if this is the last peer (has lm_head)
                 # Intermediate peers need to pass full sequence for KV cache building

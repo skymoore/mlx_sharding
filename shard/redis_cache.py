@@ -150,43 +150,51 @@ class RedisKVCache:
     def get_cache(
         self,
         session_id: str,
-        num_layers: int
+        start_layer: int,
+        end_layer: int
     ) -> Optional[list]:
         """
-        Read cache for all layers from Redis and reconstruct KVCache objects.
+        Read cache for specific layer range from Redis and reconstruct KVCache objects.
         
         Args:
             session_id: Unique session identifier
-            num_layers: Number of layers to read cache for
+            start_layer: Global start layer index (inclusive)
+            end_layer: Global end layer index (exclusive)
             
         Returns:
-            List of KVCache objects (one per layer), or None if not found
+            List of KVCache objects indexed 0 to (end_layer - start_layer), or None if not found
         """
         try:
             from mlx_lm.models.cache import KVCache
             
+            num_layers = end_layer - start_layer
+            assert num_layers > 0, f"Invalid layer range: start={start_layer}, end={end_layer}"
+            
             if self.enable_pipelining:
                 # Use pipeline for batch read
                 pipe = self.client.pipeline()
-                for layer_idx in range(num_layers):
-                    key = self._make_key(session_id, layer_idx)
+                for local_idx in range(num_layers):
+                    global_idx = start_layer + local_idx
+                    key = self._make_key(session_id, global_idx)
                     pipe.get(key)
                 results = pipe.execute()
             else:
                 # Sequential reads
                 results = []
-                for layer_idx in range(num_layers):
-                    key = self._make_key(session_id, layer_idx)
+                for local_idx in range(num_layers):
+                    global_idx = start_layer + local_idx
+                    key = self._make_key(session_id, global_idx)
                     results.append(self.client.get(key))
             
             # Check if any cache exists
             if all(r is None for r in results):
-                logger.debug(f"No cache found for session {session_id}")
+                logger.debug(f"No cache found for session {session_id} (layers {start_layer}-{end_layer-1})")
                 return None
             
             # Deserialize cache entries and create KVCache objects
             cache = []
-            for layer_idx, data in enumerate(results):
+            for local_idx, data in enumerate(results):
+                global_idx = start_layer + local_idx
                 if data is not None:
                     deserialized = self._deserialize_cache(data)
                     # Create KVCache object
@@ -201,10 +209,10 @@ class RedisKVCache:
                     cache.append(kv_cache)
                 else:
                     # Missing layer cache - create empty KVCache
-                    logger.warning(f"Missing cache for session {session_id} layer {layer_idx}")
+                    logger.warning(f"Missing cache for session {session_id} global layer {global_idx}")
                     cache.append(KVCache())
             
-            logger.debug(f"Retrieved cache for session {session_id} ({num_layers} layers)")
+            logger.debug(f"Retrieved cache for session {session_id} (layers {start_layer}-{end_layer-1}, {num_layers} total)")
             return cache
             
         except Exception as e:
@@ -215,14 +223,16 @@ class RedisKVCache:
         self,
         session_id: str,
         cache: list,
+        start_layer: int,
         ttl: Optional[int] = None
     ) -> bool:
         """
-        Write cache for all layers to Redis.
+        Write cache for specific layer range to Redis.
         
         Args:
             session_id: Unique session identifier
-            cache: List of cache tuples (one per layer)
+            cache: List of cache tuples (one per layer), indexed locally 0 to N
+            start_layer: Global start layer index (cache[0] maps to this global layer)
             ttl: Time-to-live in seconds (uses default_ttl if None)
             
         Returns:
@@ -232,27 +242,32 @@ class RedisKVCache:
             ttl = self.default_ttl
         
         try:
-            logger.debug(f"set_cache called with cache type: {type(cache)}, length: {len(cache) if hasattr(cache, '__len__') else 'N/A'}")
+            num_layers = len(cache)
+            logger.debug(f"set_cache called with cache type: {type(cache)}, length: {num_layers}, start_layer: {start_layer}")
+            
             if self.enable_pipelining:
                 # Use pipeline for batch write
                 pipe = self.client.pipeline()
-                for layer_idx, layer_cache in enumerate(cache):
+                for local_idx, layer_cache in enumerate(cache):
                     if layer_cache is not None:
-                        logger.debug(f"  Layer {layer_idx}: type={type(layer_cache)}, has_state={hasattr(layer_cache, 'state')}")
-                        key = self._make_key(session_id, layer_idx)
+                        global_idx = start_layer + local_idx
+                        logger.debug(f"  Local {local_idx} → Global {global_idx}: type={type(layer_cache)}")
+                        key = self._make_key(session_id, global_idx)
                         data = self._serialize_cache(layer_cache)
                         pipe.setex(key, ttl, data)
                 pipe.execute()
             else:
                 # Sequential writes
-                for layer_idx, layer_cache in enumerate(cache):
+                for local_idx, layer_cache in enumerate(cache):
                     if layer_cache is not None:
-                        logger.debug(f"  Layer {layer_idx}: type={type(layer_cache)}, has_state={hasattr(layer_cache, 'state')}")
-                        key = self._make_key(session_id, layer_idx)
+                        global_idx = start_layer + local_idx
+                        logger.debug(f"  Local {local_idx} → Global {global_idx}: type={type(layer_cache)}")
+                        key = self._make_key(session_id, global_idx)
                         data = self._serialize_cache(layer_cache)
                         self.client.setex(key, ttl, data)
             
-            logger.debug(f"Stored cache for session {session_id} ({len(cache)} layers, TTL={ttl}s)")
+            end_layer = start_layer + num_layers - 1
+            logger.debug(f"Stored cache for session {session_id} (layers {start_layer}-{end_layer}, {num_layers} total, TTL={ttl}s)")
             return True
             
         except Exception as e:
