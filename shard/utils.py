@@ -78,11 +78,20 @@ def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = N
 
 
 def send_tensor(stub, tensor: mx.array):
+    tensor_bytes = tensor_to_bytes(tensor)
+    message_size_mb = len(tensor_bytes) / (1024 * 1024)
+    logger.info(f"Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, size={message_size_mb:.2f}MB")
+    
     tensor_message = mlx_tensor_pb2.Tensor(
-        tensor_data=tensor_to_bytes(tensor), shape=list(tensor.shape), dtype=str(tensor.dtype)
+        tensor_data=tensor_bytes, shape=list(tensor.shape), dtype=str(tensor.dtype)
     )
-    response = stub.SendTensor(tensor_message)
-    return response
+    
+    try:
+        response = stub.SendTensor(tensor_message)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to send {message_size_mb:.2f}MB tensor: {e}")
+        raise
 
 
 def response_to_mlx_array(response):
