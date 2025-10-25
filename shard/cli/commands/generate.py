@@ -1,13 +1,16 @@
 """Generate text using distributed inference."""
+
 import os
-os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 import warnings
+
 warnings.filterwarnings("ignore", message=".*PyTorch.*TensorFlow.*Flax.*")
 
 import click
 import time
-from typing import List, Tuple
+from typing import List
 import grpc
 import mlx.core as mx
 from transformers import AutoTokenizer
@@ -58,7 +61,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 def generate(model, prompt, max_tokens, server_address, start_layer, end_layer):
     """Generate text using a distributed model."""
     from shard.grpc import mlx_tensor_pb2, mlx_tensor_pb2_grpc
-    from shard.server.utils import load_model, response_to_mlx_array, send_tensor
+    from shard.server.utils import load_model
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     loaded_model = load_model(model, start_layer=start_layer, end_layer=end_layer)
@@ -144,10 +147,10 @@ def stream_generate(model, tokenizer, prompt: str, max_tokens: int = 100, stubs=
 
     tic = time.perf_counter()
     detokenizer.reset()
-    
+
     token_count = 0
     prompt_time = 0
-    
+
     for token, n in zip(
         generate_step(prompt_tokens, model, stubs),
         range(max_tokens),
@@ -164,7 +167,7 @@ def stream_generate(model, tokenizer, prompt: str, max_tokens: int = 100, stubs=
     detokenizer.finalize()
     yield detokenizer.last_segment
     gen_time = time.perf_counter() - tic
-    
+
     click.echo("=" * 10)
     if token_count == 0:
         click.echo("No tokens generated for this prompt")

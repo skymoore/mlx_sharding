@@ -8,11 +8,8 @@ This server:
 """
 
 import os
-import asyncio
 import json
 import logging
-import signal
-import sys
 import time
 import uuid
 from typing import List, Optional, Union, Dict, Any
@@ -105,6 +102,8 @@ model_provider = None
 api_keys: set[str] = set()
 setup_complete = False
 setup_info: Dict[str, Any] = {}
+orchestrator_instance = None  # Store orchestrator for cleanup
+discovered_peers = []  # Store peers for unclaiming
 
 # Security
 security = HTTPBearer(auto_error=False)
@@ -204,14 +203,14 @@ class MLXModelProvider:
             self.model = None
             self.generate_step = create_coordinator_generate_step(grpc_stubs)
 
-            # Get model type from config for tool calling
+            # Get model type from config for tool calling and stop tokens
             config_path = tokenizer_path / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                    model_type = config.get("model_type", "unknown")
+                    self.model_type = config.get("model_type", "unknown")
             else:
-                model_type = "unknown"
+                self.model_type = "unknown"
         else:
             # Peer mode: load local layers
             logging.info(f"Peer mode: loading layers {start_layer}-{end_layer}")
@@ -219,7 +218,7 @@ class MLXModelProvider:
                 model_path, start_layer=start_layer, end_layer=end_layer
             )
             self.generate_step = create_generate_step_with_grpc(grpc_stubs)
-            model_type = getattr(self.model, "model_type", "unknown")
+            self.model_type = getattr(self.model, "model_type", "unknown")
 
         # Model info
         self.model_name = (
@@ -228,15 +227,18 @@ class MLXModelProvider:
         self.created = int(time.time())
 
         # Initialize tool call manager
-        self.tool_manager = create_tool_call_manager(model_type)
+        self.tool_manager = create_tool_call_manager(self.model_type)
         logging.info(f"✓ Model provider initialized: {self.model_name}")
+        logging.info(f"✓ Model type: {self.model_type}")
         logging.info(
             f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}"
         )
 
     def get_default_stop_sequences(self) -> List[str]:
         """Get model-specific default stop sequences."""
-        model_type = getattr(self.model, "model_type", "")
+        # Use stored model_type instead of trying to get it from self.model
+        # (which is None in coordinator mode)
+        model_type = self.model_type
 
         # Model-specific stop sequences
         if model_type == "qwen3_moe" or model_type.startswith("qwen"):
@@ -252,6 +254,9 @@ class MLXModelProvider:
         stop_sequences = self.get_default_stop_sequences()
         stop_token_ids = []
 
+        logging.info(f"🛑 Getting stop token IDs for model_type: {self.model_type}")
+        logging.info(f"🛑 Stop sequences: {stop_sequences}")
+
         for seq in stop_sequences:
             try:
                 # Encode the stop sequence to get its token ID(s)
@@ -259,13 +264,18 @@ class MLXModelProvider:
                 # If it's a single token, add it to our list
                 if len(tokens) == 1:
                     stop_token_ids.append(tokens[0])
-            except:
-                pass
+                    logging.info(f"🛑 Added stop token: {seq} -> {tokens[0]}")
+                else:
+                    logging.warning(f"🛑 Skipped multi-token sequence: {seq} -> {tokens}")
+            except Exception as e:
+                logging.warning(f"🛑 Failed to encode {seq}: {e}")
 
         # Always include EOS token
         if self.tokenizer.eos_token_id is not None:
             stop_token_ids.append(self.tokenizer.eos_token_id)
+            logging.info(f"🛑 Added EOS token: {self.tokenizer.eos_token_id}")
 
+        logging.info(f"🛑 Final stop_token_ids: {stop_token_ids}")
         return stop_token_ids
 
     def generate(self, prompt: mx.array, **kwargs):
@@ -883,7 +893,7 @@ async def run_orchestrator_setup(
     model_path: str, grpc_port: int, http_port: int
 ) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
-    global setup_complete, setup_info, model_provider
+    global setup_complete, setup_info, model_provider, orchestrator_instance, discovered_peers
 
     logger.info("=" * 80)
     logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP (COORDINATOR-ONLY)")
@@ -896,10 +906,16 @@ async def run_orchestrator_setup(
     orchestrator = Orchestrator(
         model_name=model_path, grpc_port=grpc_port, http_port=http_port
     )
+    
+    # Store orchestrator globally for cleanup
+    orchestrator_instance = orchestrator
 
     # Run setup
     try:
         plan = await orchestrator.setup()
+        
+        # Store discovered peers for unclaiming on shutdown
+        discovered_peers = list(orchestrator.discovery.peers.values())
 
         logger.info("=" * 80)
         logger.info("✓ SETUP COMPLETE")
@@ -958,6 +974,33 @@ async def run_orchestrator_setup(
     except Exception as e:
         logger.error(f"Setup failed: {e}", exc_info=True)
         raise
+
+
+async def shutdown_coordinator():
+    """Gracefully shutdown the coordinator and unclaim peers."""
+    global orchestrator_instance, discovered_peers
+    
+    logger.info("=" * 80)
+    logger.info("🛑 SHUTTING DOWN COORDINATOR")
+    logger.info("=" * 80)
+    
+    if orchestrator_instance and discovered_peers:
+        try:
+            await orchestrator_instance.unclaim_peers(discovered_peers)
+            logger.info("✓ Peers unclaimed successfully")
+        except Exception as e:
+            logger.error(f"Error unclaiming peers: {e}", exc_info=True)
+    
+    if orchestrator_instance:
+        try:
+            orchestrator_instance.cleanup()
+            logger.info("✓ Orchestrator cleanup complete")
+        except Exception as e:
+            logger.error(f"Error during orchestrator cleanup: {e}", exc_info=True)
+    
+    logger.info("=" * 80)
+    logger.info("✓ SHUTDOWN COMPLETE")
+    logger.info("=" * 80)
 
 
 # Entry point moved to shard.cli.commands.api

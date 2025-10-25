@@ -418,6 +418,41 @@ class APIServerOrchestrator:
             self.progress.update_peer_status(peer.id, "error", error=str(e))
             raise
 
+    async def unclaim_peers(self, peers: List[PeerInfo]):
+        """Release all peers from this coordinator's claim."""
+        logger.info("Unclaiming peers...")
+        
+        tasks = []
+        for peer in peers:
+            task = self._unclaim_peer(peer)
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Log results
+        success_count = sum(1 for r in results if not isinstance(r, Exception))
+        logger.info(f"✓ Unclaimed {success_count}/{len(peers)} peer(s)")
+        
+    async def _unclaim_peer(self, peer: PeerInfo):
+        """Unclaim a single peer."""
+        try:
+            coordinator_id = self.discovery.peer_id if self.discovery else "unknown"
+            url = f"http://{peer.host}:{peer.http_port}/api/unclaim?coordinator_id={coordinator_id}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    result = await resp.json()
+                    
+                    if result.get("success"):
+                        logger.info(f"✓ Unclaimed peer {peer.id[:8]}")
+                    else:
+                        logger.warning(f"Failed to unclaim peer {peer.id[:8]}: {result}")
+                        
+        except Exception as e:
+            logger.warning(f"Failed to unclaim peer {peer.id[:8]}: {e}")
+
     def cleanup(self):
         """Cleanup resources."""
         if self.discovery:

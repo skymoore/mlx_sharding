@@ -47,6 +47,7 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
         app,
         load_api_keys,
         run_orchestrator_setup,
+        shutdown_coordinator,
         api_keys as global_api_keys,
     )
 
@@ -85,10 +86,17 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
     # Run setup before starting server
     asyncio.run(startup())
 
-    # Setup signal handlers
+    # Setup signal handlers for graceful shutdown
     def signal_handler(sig, frame):
-        logging.info("\nShutting down server...")
-        sys.exit(0)
+        logging.info("\n🛑 Received shutdown signal...")
+        # Run async shutdown
+        try:
+            asyncio.run(shutdown_coordinator())
+        except Exception as e:
+            logging.error(f"Error during shutdown: {e}")
+        finally:
+            logging.info("Exiting...")
+            sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -109,5 +117,11 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
             access_log=False,
         )
     except KeyboardInterrupt:
-        logging.info("\nServer stopped")
-        sys.exit(0)
+        logging.info("\n🛑 Keyboard interrupt received...")
+        try:
+            asyncio.run(shutdown_coordinator())
+        except Exception as e:
+            logging.error(f"Error during shutdown: {e}")
+        finally:
+            logging.info("Server stopped")
+            sys.exit(0)
