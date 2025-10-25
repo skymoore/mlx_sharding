@@ -8,7 +8,6 @@ This server:
 """
 
 import os
-import argparse
 import asyncio
 import json
 import logging
@@ -961,100 +960,4 @@ async def run_orchestrator_setup(
         raise
 
 
-def main():
-    """Main entry point for V2 API server."""
-    parser = argparse.ArgumentParser(
-        description="MLX Sharding V2 - Zero-Configuration Distributed Inference API"
-    )
-    parser.add_argument(
-        "--model", type=str, required=True, help="Path to MLX model or HuggingFace repo"
-    )
-    # Note: API server is coordinator-only, it does not load model layers
-    # Users should start separate peer processes with mlx-shard-peer
-    parser.add_argument(
-        "--grpc-port",
-        type=int,
-        default=50051,
-        help="gRPC port for local peer (default: 50051)",
-    )
-    parser.add_argument(
-        "--http-port", type=int, default=8080, help="HTTP API port (default: 8080)"
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level",
-    )
-    parser.add_argument(
-        "--cache-limit-gb", type=int, default=None, help="MLX cache limit in GB"
-    )
-
-    args = parser.parse_args()
-
-    # Setup logging
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
-
-    # Set cache limit
-    if args.cache_limit_gb:
-        mx.metal.set_cache_limit(args.cache_limit_gb * 1024 * 1024 * 1024)
-
-    # Load API keys
-    global api_keys
-    api_keys = load_api_keys()
-    if api_keys:
-        logging.info(
-            f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)"
-        )
-    else:
-        logging.warning("⚠ No API keys configured - authentication disabled!")
-
-    # Run orchestrator setup in background
-    async def startup():
-        try:
-            await run_orchestrator_setup(
-                model_path=args.model,
-                grpc_port=args.grpc_port,
-                http_port=args.http_port,
-            )
-        except Exception as e:
-            logging.error(f"Fatal setup error: {e}")
-            sys.exit(1)
-
-    # Run setup before starting server
-    asyncio.run(startup())
-
-    # Setup signal handlers
-    def signal_handler(sig, frame):
-        logging.info("\nShutting down server...")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # Start FastAPI server
-    logging.info(f"🚀 Starting API server on 0.0.0.0:{args.http_port}")
-    logging.info(f"   OpenAI API: http://0.0.0.0:{args.http_port}/v1")
-    logging.info(f"   Health: http://0.0.0.0:{args.http_port}/health")
-    logging.info(f"   Setup Status: http://0.0.0.0:{args.http_port}/v1/setup/status")
-    logging.info("Press Ctrl+C to stop")
-
-    try:
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=args.http_port,
-            log_level=args.log_level.lower(),
-            access_log=False,
-        )
-    except KeyboardInterrupt:
-        logging.info("\nServer stopped")
-        sys.exit(0)
-
-
-if __name__ == "__main__":
-    main()
+# Entry point moved to shard.cli.commands.api

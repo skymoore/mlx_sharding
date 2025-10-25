@@ -2,6 +2,13 @@
 MLX Sharding CLI - Main entry point for all commands.
 """
 
+# Suppress transformers warnings - must be before any imports that use transformers
+import os
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
+import warnings
+warnings.filterwarnings("ignore", message=".*PyTorch.*TensorFlow.*Flax.*")
+
 import click
 
 # Import subcommands

@@ -1,4 +1,10 @@
 """Generate text using distributed inference."""
+import os
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
+import warnings
+warnings.filterwarnings("ignore", message=".*PyTorch.*TensorFlow.*Flax.*")
+
 import click
 import time
 from typing import List, Tuple

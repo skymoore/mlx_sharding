@@ -8,7 +8,6 @@ This is a lightweight worker node that:
 - Executes inference via gRPC
 """
 
-import argparse
 import logging
 import threading
 import signal
@@ -442,71 +441,4 @@ class PeerServer:
         logger.info("✓ Peer server stopped")
 
 
-def main():
-    """Main entry point for peer server."""
-    parser = argparse.ArgumentParser(
-        description="MLX Shard Peer - Zero-configuration worker node"
-    )
-    parser.add_argument(
-        "--grpc-port", type=int, default=50052, help="gRPC server port (default: 50052)"
-    )
-    parser.add_argument(
-        "--http-port",
-        type=int,
-        default=8081,
-        help="HTTP control server port (default: 8081)",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default="~/.cache/mlx-sharding",
-        help="Cache directory for model files",
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level",
-    )
-    parser.add_argument(
-        "--bind-ip",
-        type=str,
-        default=None,
-        help="Specific IP address to bind to (optional, auto-detect if not specified)",
-    )
-    args = parser.parse_args()
-
-    # Setup logging
-    logging.getLogger().setLevel(getattr(logging, args.log_level))
-
-    # Create and start server
-    server = PeerServer(
-        grpc_port=args.grpc_port,
-        http_port=args.http_port,
-        cache_dir=args.cache_dir,
-        bind_ip=args.bind_ip,
-    )
-
-    # Setup signal handlers
-    def signal_handler(sig, frame):
-        logger.info("\nReceived shutdown signal")
-        server.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # Start server
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        logger.info("\nShutting down...")
-        server.stop()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+# Entry point moved to shard.cli.commands.peer
