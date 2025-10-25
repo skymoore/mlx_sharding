@@ -20,28 +20,33 @@ from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
 
 # Suppress verbose gRPC error logs
-os.environ['GRPC_VERBOSITY'] = 'ERROR'
-os.environ['GRPC_TRACE'] = ''
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GRPC_TRACE"] = ""
 
 import mlx.core as mx
 from fastapi import FastAPI, HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uvicorn
 import grpc
 
-from .grpc import mlx_tensor_pb2_grpc
+from shard.grpc import mlx_tensor_pb2_grpc
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import hf_repo_to_path
-from .utils import create_generate_step_with_grpc, create_coordinator_generate_step, load_model
-from .tool_calling import (
-    ToolDefinition, ToolCall, ToolCallManager,
-    create_tool_call_manager
+from shard.server.utils import (
+    create_generate_step_with_grpc,
+    create_coordinator_generate_step,
+    load_model,
 )
-from .orchestrator import APIServerOrchestrator as Orchestrator
-from .discovery import PeerDiscovery
+from shard.api.tool_calling import (
+    ToolDefinition,
+    ToolCall,
+    ToolCallManager,
+    create_tool_call_manager,
+)
+from shard.orchestrator.orchestrator import APIServerOrchestrator as Orchestrator
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -109,35 +114,37 @@ security = HTTPBearer(auto_error=False)
 def load_api_keys() -> set[str]:
     """Load API keys from environment variable or file."""
     keys = set()
-    
+
     # Load from environment variable (comma-separated)
     env_keys = os.environ.get("MLX_API_KEYS", "")
     if env_keys:
         keys.update(k.strip() for k in env_keys.split(",") if k.strip())
-    
+
     # Load from file (one key per line)
     api_key_file = os.environ.get("MLX_API_KEY_FILE", ".api_keys")
     if os.path.exists(api_key_file):
         with open(api_key_file, "r") as f:
-            keys.update(line.strip() for line in f if line.strip() and not line.startswith("#"))
-    
+            keys.update(
+                line.strip() for line in f if line.strip() and not line.startswith("#")
+            )
+
     return keys
 
 
 async def verify_api_key(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
 ) -> bool:
     """Verify API key from Authorization header."""
     # Skip authentication for health check and setup status
     if request.url.path in ["/health", "/v1/setup/status"]:
         return True
-    
+
     # If no API keys configured, allow all requests
     if not api_keys:
         logging.warning("No API keys configured - authentication disabled")
         return True
-    
+
     # Check for valid credentials
     if not credentials:
         raise HTTPException(
@@ -145,7 +152,7 @@ async def verify_api_key(
             detail="Missing authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Verify the API key
     if credentials.credentials not in api_keys:
         raise HTTPException(
@@ -153,7 +160,7 @@ async def verify_api_key(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return True
 
 
@@ -169,65 +176,83 @@ app.add_middleware(
 
 class MLXModelProvider:
     """Manages model loading and generation with distributed inference."""
-    
-    def __init__(self, model_path: str, start_layer: Optional[int], end_layer: Optional[int], grpc_stubs: List):
+
+    def __init__(
+        self,
+        model_path: str,
+        start_layer: Optional[int],
+        end_layer: Optional[int],
+        grpc_stubs: List,
+    ):
         self.model_path = model_path
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.grpc_stubs = grpc_stubs
-        
+
         # Load tokenizer (always needed)
-        tokenizer_path = Path(model_path) if Path(model_path).exists() else hf_repo_to_path(model_path)
+        tokenizer_path = (
+            Path(model_path)
+            if Path(model_path).exists()
+            else hf_repo_to_path(model_path)
+        )
         self.tokenizer = load_tokenizer(tokenizer_path)
-        
+
         # Coordinator mode: no local layers
         if start_layer is None and end_layer is None:
-            logging.info("Coordinator-only mode: no local model, pipeline coordination only")
+            logging.info(
+                "Coordinator-only mode: no local model, pipeline coordination only"
+            )
             self.model = None
             self.generate_step = create_coordinator_generate_step(grpc_stubs)
-            
+
             # Get model type from config for tool calling
             config_path = tokenizer_path / "config.json"
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
-                    model_type = config.get('model_type', 'unknown')
+                    model_type = config.get("model_type", "unknown")
             else:
-                model_type = 'unknown'
+                model_type = "unknown"
         else:
             # Peer mode: load local layers
             logging.info(f"Peer mode: loading layers {start_layer}-{end_layer}")
-            self.model = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
+            self.model = load_model(
+                model_path, start_layer=start_layer, end_layer=end_layer
+            )
             self.generate_step = create_generate_step_with_grpc(grpc_stubs)
-            model_type = getattr(self.model, 'model_type', 'unknown')
-        
+            model_type = getattr(self.model, "model_type", "unknown")
+
         # Model info
-        self.model_name = Path(model_path).name if Path(model_path).exists() else model_path
+        self.model_name = (
+            Path(model_path).name if Path(model_path).exists() else model_path
+        )
         self.created = int(time.time())
-        
+
         # Initialize tool call manager
         self.tool_manager = create_tool_call_manager(model_type)
         logging.info(f"✓ Model provider initialized: {self.model_name}")
-        logging.info(f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}")
-    
+        logging.info(
+            f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}"
+        )
+
     def get_default_stop_sequences(self) -> List[str]:
         """Get model-specific default stop sequences."""
-        model_type = getattr(self.model, 'model_type', '')
-        
+        model_type = getattr(self.model, "model_type", "")
+
         # Model-specific stop sequences
-        if model_type == 'qwen3_moe' or model_type.startswith('qwen'):
+        if model_type == "qwen3_moe" or model_type.startswith("qwen"):
             return ["<|im_end|>", "<|endoftext|>"]
-        elif model_type == 'glm4_moe' or model_type.startswith('glm'):
+        elif model_type == "glm4_moe" or model_type.startswith("glm"):
             return ["<|user|>", "<|endoftext|>", "<|observation|>", "<|assistant|>"]
         else:
             # Generic stop sequences
             return ["<|endoftext|>"]
-    
+
     def get_stop_token_ids(self) -> List[int]:
         """Get token IDs for stop sequences to check during generation."""
         stop_sequences = self.get_default_stop_sequences()
         stop_token_ids = []
-        
+
         for seq in stop_sequences:
             try:
                 # Encode the stop sequence to get its token ID(s)
@@ -237,44 +262,40 @@ class MLXModelProvider:
                     stop_token_ids.append(tokens[0])
             except:
                 pass
-        
+
         # Always include EOS token
         if self.tokenizer.eos_token_id is not None:
             stop_token_ids.append(self.tokenizer.eos_token_id)
-        
+
         return stop_token_ids
-    
+
     def generate(self, prompt: mx.array, **kwargs):
         """Generate tokens using the distributed model."""
         # Coordinator mode doesn't need model parameter
         if self.model is None:
             return self.generate_step(
                 prompt=prompt,
-                temp=kwargs.get('temperature', 0.7),
-                top_p=kwargs.get('top_p', 1.0),
-                repetition_penalty=kwargs.get('repetition_penalty', 1.0),
-                repetition_context_size=kwargs.get('repetition_context_size', 20),
+                temp=kwargs.get("temperature", 0.7),
+                top_p=kwargs.get("top_p", 1.0),
+                repetition_penalty=kwargs.get("repetition_penalty", 1.0),
+                repetition_context_size=kwargs.get("repetition_context_size", 20),
             )
         else:
             # Peer mode needs model parameter
             return self.generate_step(
                 prompt=prompt,
                 model=self.model,
-                temp=kwargs.get('temperature', 0.7),
-                top_p=kwargs.get('top_p', 1.0),
-                repetition_penalty=kwargs.get('repetition_penalty', 1.0),
-                repetition_context_size=kwargs.get('repetition_context_size', 20),
+                temp=kwargs.get("temperature", 0.7),
+                top_p=kwargs.get("top_p", 1.0),
+                repetition_penalty=kwargs.get("repetition_penalty", 1.0),
+                repetition_context_size=kwargs.get("repetition_context_size", 20),
             )
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {
-        "status": "ok",
-        "setup_complete": setup_complete,
-        "version": "2.0.0"
-    }
+    return {"status": "ok", "setup_complete": setup_complete, "version": "2.0.0"}
 
 
 @app.get("/v1/setup/status")
@@ -283,19 +304,18 @@ async def get_setup_status():
     return {
         "setup_complete": setup_complete,
         "setup_info": setup_info,
-        "timestamp": time.time()
+        "timestamp": time.time(),
     }
 
 
 @app.get("/v1/models")
 async def list_models(
-    request: Request,
-    authenticated: bool = Security(verify_api_key)
+    request: Request, authenticated: bool = Security(verify_api_key)
 ) -> ModelList:
     """List available models (OpenAI format)."""
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
-    
+
     return ModelList(
         data=[
             ModelInfo(
@@ -308,13 +328,12 @@ async def list_models(
 
 @app.get("/api/models")
 async def list_models_openwebui(
-    request: Request,
-    authenticated: bool = Security(verify_api_key)
+    request: Request, authenticated: bool = Security(verify_api_key)
 ) -> OpenWebUIModelList:
     """List available models (Open WebUI format)."""
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
-    
+
     return OpenWebUIModelList(
         models=[
             ModelInfo(
@@ -329,41 +348,38 @@ async def list_models_openwebui(
 async def chat_completions(
     request: ChatCompletionRequest,
     http_request: Request,
-    authenticated: bool = Security(verify_api_key)
+    authenticated: bool = Security(verify_api_key),
 ):
     """Handle chat completion requests with tool calling support."""
     import json
-    
+
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
-    
-    # Pretty print request
-    logging.info("=" * 80)
-    logging.info("📥 CHAT COMPLETION REQUEST")
-    logging.info(f"Model: {request.model}")
-    logging.info(f"Messages: {len(request.messages)}")
-    logging.info(f"Stream: {request.stream}")
-    logging.info(f"Max tokens: {request.max_tokens}")
-    logging.info(f"Tools: {len(request.tools) if request.tools else 0}")
-    for i, msg in enumerate(request.messages):
-        content_preview = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
-        logging.info(f"  [{i}] {msg.role}: {content_preview}")
-    logging.info("=" * 80)
-    
+
     try:
         # Prepare messages
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
-        
+
         # Add tool descriptions to system message if tools provided
         if request.tools:
-            tool_prompt = model_provider.tool_manager.format_tools_for_prompt(request.tools)
+            tool_prompt = model_provider.tool_manager.format_tools_for_prompt(
+                request.tools
+            )
             # Find or create system message
-            system_msg_idx = next((i for i, m in enumerate(messages) if m["role"] == "system"), None)
+            system_msg_idx = next(
+                (i for i, m in enumerate(messages) if m["role"] == "system"), None
+            )
             if system_msg_idx is not None:
                 messages[system_msg_idx]["content"] += tool_prompt
             else:
-                messages.insert(0, {"role": "system", "content": f"You are a helpful assistant.{tool_prompt}"})
-        
+                messages.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": f"You are a helpful assistant.{tool_prompt}",
+                    },
+                )
+
         # Apply chat template
         if hasattr(model_provider.tokenizer, "apply_chat_template"):
             prompt = model_provider.tokenizer.apply_chat_template(
@@ -375,18 +391,18 @@ async def chat_completions(
             # Fallback: simple concatenation
             prompt_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
             prompt = model_provider.tokenizer.encode(prompt_text)
-        
+
         prompt_array = mx.array(prompt)
-        
+
         # Handle streaming vs non-streaming
         if request.stream:
             return StreamingResponse(
                 stream_chat_completion(request, prompt_array),
-                media_type="text/event-stream"
+                media_type="text/event-stream",
             )
         else:
             return await generate_chat_completion(request, prompt_array)
-    
+
     except Exception as e:
         logging.error(f"Error in chat completion: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -396,24 +412,23 @@ async def chat_completions(
 async def completions(
     request: CompletionRequest,
     http_request: Request,
-    authenticated: bool = Security(verify_api_key)
+    authenticated: bool = Security(verify_api_key),
 ):
     """Handle text completion requests."""
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
-    
+
     try:
         prompt = model_provider.tokenizer.encode(request.prompt)
         prompt_array = mx.array(prompt)
-        
+
         if request.stream:
             return StreamingResponse(
-                stream_completion(request, prompt_array),
-                media_type="text/event-stream"
+                stream_completion(request, prompt_array), media_type="text/event-stream"
             )
         else:
             return await generate_completion(request, prompt_array)
-    
+
     except Exception as e:
         logging.error(f"Error in completion: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -429,12 +444,14 @@ def check_stop_sequences(text: str, stop_sequences: List[str]) -> tuple[bool, st
     return False, text
 
 
-async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.array) -> Dict[str, Any]:
+async def generate_chat_completion(
+    request: ChatCompletionRequest, prompt: mx.array
+) -> Dict[str, Any]:
     """Generate non-streaming chat completion."""
     tokens = []
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-    
+
     # Prepare stop sequences
     stop_sequences = []
     if request.stop:
@@ -442,54 +459,59 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
             stop_sequences = [request.stop]
         else:
             stop_sequences = request.stop
-    
+
     # Add model-specific default stop sequences
     stop_sequences.extend(model_provider.get_default_stop_sequences())
-    
+
     # Get stop token IDs for faster checking
     stop_token_ids = model_provider.get_stop_token_ids()
-    
+
     finish_reason = "length"
-    
+
     for (token, _), _ in zip(
         model_provider.generate(
-            prompt, 
-            temperature=request.temperature, 
+            prompt,
+            temperature=request.temperature,
             top_p=request.top_p,
             repetition_penalty=request.repetition_penalty,
-            repetition_context_size=request.repetition_context_size
+            repetition_context_size=request.repetition_context_size,
         ),
-        range(request.max_tokens)
+        range(request.max_tokens),
     ):
         tokens.append(token)
         detokenizer.add_token(token)
-        
+
         # Check for stop tokens by ID (faster and more reliable)
         # Convert MLX array to Python int for comparison
-        token_id = int(token.item()) if hasattr(token, 'item') else int(token)
+        token_id = int(token.item()) if hasattr(token, "item") else int(token)
         if token_id in stop_token_ids:
+            logging.debug(f"Stop token detected: {token_id} in {stop_token_ids}")
             finish_reason = "stop"
             break
-        
+
+        # Debug: Log first few tokens to verify token IDs
+        if len(tokens) <= 5 or token_id in [151336, 151337, 151338, 151329]:
+            logging.debug(f"Token {len(tokens)}: {token_id}")
+
         # Also check for stop sequences in generated text (for multi-token stops)
         current_text = detokenizer.text
         stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
         if stop_found:
             finish_reason = "stop"
             break
-    
+
     detokenizer.finalize()
     text = detokenizer.text
-    
+
     # Final check and trim stop sequences
     _, text = check_stop_sequences(text, stop_sequences)
-    
+
     # Parse tool calls if tools were provided
     cleaned_content = text
     tool_calls = []
     if request.tools:
         cleaned_content, tool_calls = model_provider.tool_manager.parse(text)
-    
+
     # Build response
     response = {
         "id": f"chatcmpl-{uuid.uuid4()}",
@@ -512,34 +534,15 @@ async def generate_chat_completion(request: ChatCompletionRequest, prompt: mx.ar
             "total_tokens": len(prompt) + len(tokens),
         },
     }
-    
+
     # Add tool_calls if any were found
     if tool_calls:
         response["choices"][0]["message"]["tool_calls"] = [
-            {
-                "id": tc.id,
-                "type": tc.type,
-                "function": tc.function
-            }
-            for tc in tool_calls
+            {"id": tc.id, "type": tc.type, "function": tc.function} for tc in tool_calls
         ]
         # When tool calls present, finish_reason should be "tool_calls"
         response["choices"][0]["finish_reason"] = "tool_calls"
-    
-    # Pretty print response
-    logging.info("=" * 80)
-    logging.info("📤 CHAT COMPLETION RESPONSE")
-    logging.info(f"Finish reason: {response['choices'][0]['finish_reason']}")
-    content = response['choices'][0]['message']['content']
-    content_preview = content[:200] + "..." if len(content) > 200 else content
-    logging.info(f"Content: {content_preview}")
-    if 'tool_calls' in response['choices'][0]['message']:
-        logging.info(f"Tool calls: {len(response['choices'][0]['message']['tool_calls'])}")
-        for tc in response['choices'][0]['message']['tool_calls']:
-            logging.info(f"  - {tc['function']['name']}")
-    logging.info(f"Tokens: {response['usage']['total_tokens']}")
-    logging.info("=" * 80)
-    
+
     return response
 
 
@@ -547,17 +550,17 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
     """Generate streaming chat completion with tool call support."""
     import json
     import asyncio
-    
+
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-    
+
     # Create streaming parser if tools provided
     streaming_parser = None
     if request.tools:
         streaming_parser = model_provider.tool_manager.create_streaming_parser()
-    
+
     # Prepare stop sequences
     stop_sequences = []
     if request.stop:
@@ -566,53 +569,57 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
         else:
             stop_sequences = request.stop
     stop_sequences.extend(model_provider.get_default_stop_sequences())
-    
+
     # Get stop token IDs for faster checking
     stop_token_ids = model_provider.get_stop_token_ids()
-    
+
     finish_reason = "length"
-    
+
     try:
         for (token, _), _ in zip(
             model_provider.generate(
-                prompt, 
-                temperature=request.temperature, 
+                prompt,
+                temperature=request.temperature,
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
-                repetition_context_size=request.repetition_context_size
+                repetition_context_size=request.repetition_context_size,
             ),
-            range(request.max_tokens)
+            range(request.max_tokens),
         ):
             detokenizer.add_token(token)
-            
+
             # Check for stop tokens by ID (faster and more reliable)
             # Convert MLX array to Python int for comparison
-            token_id = int(token.item()) if hasattr(token, 'item') else int(token)
+            token_id = int(token.item()) if hasattr(token, "item") else int(token)
             if token_id in stop_token_ids:
                 finish_reason = "stop"
                 break
-            
+
             # Also check for stop sequences in full text (for multi-token stops)
             current_text = detokenizer.text
-            stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
+            stop_found, trimmed_text = check_stop_sequences(
+                current_text, stop_sequences
+            )
             if stop_found:
                 finish_reason = "stop"
                 break
-            
+
             # Get the segment to send
             text = detokenizer.last_segment
-            
+
             # Check if this segment contains a stop sequence
             if text:
-                segment_stop_found, trimmed_segment = check_stop_sequences(text, stop_sequences)
+                segment_stop_found, trimmed_segment = check_stop_sequences(
+                    text, stop_sequences
+                )
                 if segment_stop_found:
                     finish_reason = "stop"
                     text = trimmed_segment
-                
+
                 # Parse for tool calls if enabled
                 if streaming_parser and text:
                     content_to_emit, new_tool_calls = streaming_parser.add_chunk(text)
-                    
+
                     # Emit content chunk if any
                     if content_to_emit:
                         chunk = {
@@ -620,10 +627,16 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": request.model,
-                            "choices": [{"index": 0, "delta": {"content": content_to_emit}, "finish_reason": None}],
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": content_to_emit},
+                                    "finish_reason": None,
+                                }
+                            ],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
-                    
+
                     # Emit tool call chunks if any
                     for tool_call in new_tool_calls:
                         chunk = {
@@ -631,21 +644,27 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": request.model,
-                            "choices": [{
-                                "index": 0,
-                                "delta": {
-                                    "tool_calls": [{
-                                        "index": 0,
-                                        "id": tool_call.id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_call.function["name"],
-                                            "arguments": tool_call.function["arguments"]
-                                        }
-                                    }]
-                                },
-                                "finish_reason": None
-                            }],
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": tool_call.id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": tool_call.function["name"],
+                                                    "arguments": tool_call.function[
+                                                        "arguments"
+                                                    ],
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
                         }
                         yield f"data: {json.dumps(chunk)}\n\n"
                 elif text:
@@ -655,57 +674,75 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": request.model,
-                        "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": text},
+                                "finish_reason": None,
+                            }
+                        ],
                     }
                     yield f"data: {json.dumps(chunk)}\n\n"
-                
+
                 await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
-                
+
                 if segment_stop_found:
                     break
-        
+
         # Finalize - get any remaining content
         if streaming_parser:
             remaining_content, remaining_tool_calls = streaming_parser.finalize()
-            
+
             if remaining_content:
                 chunk = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": request.model,
-                    "choices": [{"index": 0, "delta": {"content": remaining_content}, "finish_reason": None}],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": remaining_content},
+                            "finish_reason": None,
+                        }
+                    ],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-            
+
             for tool_call in remaining_tool_calls:
                 chunk = {
                     "id": request_id,
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": request.model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": 0,
-                                "id": tool_call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call.function["name"],
-                                    "arguments": tool_call.function["arguments"]
-                                }
-                            }]
-                        },
-                        "finish_reason": None
-                    }],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": tool_call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_call.function["name"],
+                                            "arguments": tool_call.function[
+                                                "arguments"
+                                            ],
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-            
+
             # Update finish_reason if tool calls were emitted
             if streaming_parser.emitted_tool_calls:
                 finish_reason = "tool_calls"
-        
+
         # Send final chunk
         final_chunk = {
             "id": request_id,
@@ -716,12 +753,12 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
         }
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
-    
+
     except GeneratorExit:
         # Client disconnected
         logging.info(f"Client disconnected during streaming (request {request_id})")
         raise
-    
+
     except Exception as e:
         logging.error(f"Error in streaming: {e}", exc_info=True)
         try:
@@ -738,31 +775,33 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
             pass
 
 
-async def generate_completion(request: CompletionRequest, prompt: mx.array) -> Dict[str, Any]:
+async def generate_completion(
+    request: CompletionRequest, prompt: mx.array
+) -> Dict[str, Any]:
     """Generate non-streaming completion."""
     tokens = []
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-    
+
     for (token, _), _ in zip(
         model_provider.generate(
-            prompt, 
-            temperature=request.temperature, 
+            prompt,
+            temperature=request.temperature,
             top_p=request.top_p,
             repetition_penalty=request.repetition_penalty,
-            repetition_context_size=request.repetition_context_size
+            repetition_context_size=request.repetition_context_size,
         ),
-        range(request.max_tokens)
+        range(request.max_tokens),
     ):
         tokens.append(token)
         detokenizer.add_token(token)
-        
+
         if token == model_provider.tokenizer.eos_token_id:
             break
-    
+
     detokenizer.finalize()
     text = detokenizer.text
-    
+
     return {
         "id": f"cmpl-{uuid.uuid4()}",
         "object": "text_completion",
@@ -787,25 +826,25 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
     """Generate streaming completion."""
     import json
     import asyncio
-    
+
     request_id = f"cmpl-{uuid.uuid4()}"
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-    
+
     try:
         for (token, _), _ in zip(
             model_provider.generate(
-                prompt, 
-                temperature=request.temperature, 
+                prompt,
+                temperature=request.temperature,
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
-                repetition_context_size=request.repetition_context_size
+                repetition_context_size=request.repetition_context_size,
             ),
-            range(request.max_tokens)
+            range(request.max_tokens),
         ):
             detokenizer.add_token(token)
             text = detokenizer.last_segment
-            
+
             if text:
                 chunk = {
                     "id": request_id,
@@ -820,19 +859,19 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
                         }
                     ],
                 }
-                
+
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0.001)
-            
+
             if token == model_provider.tokenizer.eos_token_id:
                 break
-        
+
         yield "data: [DONE]\n\n"
-    
+
     except GeneratorExit:
         logging.info(f"Client disconnected during streaming (request {request_id})")
         raise
-    
+
     except Exception as e:
         logging.error(f"Error in streaming: {e}", exc_info=True)
         try:
@@ -841,73 +880,82 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
             pass
 
 
-async def run_orchestrator_setup(model_path: str, grpc_port: int, http_port: int) -> Dict[str, Any]:
+async def run_orchestrator_setup(
+    model_path: str, grpc_port: int, http_port: int
+) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider
-    
+
     logger.info("=" * 80)
     logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP (COORDINATOR-ONLY)")
     logger.info("=" * 80)
     logger.info("Note: API server does NOT load model layers")
     logger.info("      Start peer processes separately with: mlx-shard-peer")
     logger.info("=" * 80)
-    
+
     # Create orchestrator (coordinator-only mode - no local layers)
     orchestrator = Orchestrator(
-        model_name=model_path,
-        grpc_port=grpc_port,
-        http_port=http_port
+        model_name=model_path, grpc_port=grpc_port, http_port=http_port
     )
-    
+
     # Run setup
     try:
         plan = await orchestrator.setup()
-        
+
         logger.info("=" * 80)
         logger.info("✓ SETUP COMPLETE")
         logger.info(f"  Total layers: {plan.total_layers}")
         logger.info(f"  Shards: {len(plan.shards)}")
         logger.info(f"  Memory required: {plan.total_memory_required_gb:.1f}GB")
         logger.info("=" * 80)
-        
+
         # Store setup info
         setup_info = {
             "plan": plan.to_dict(),
             "model_path": model_path,
-            "coordinator_only": True
+            "coordinator_only": True,
         }
-        
+
         # Create gRPC stubs for ALL peers (coordinator doesn't load any layers)
         grpc_stubs = []
         for shard in plan.shards:
             # Get peer info from orchestrator's discovered peers
-            peer = next((p for p in orchestrator.discovery.peers.values() if p.id == shard.peer_id), None)
+            peer = next(
+                (
+                    p
+                    for p in orchestrator.discovery.peers.values()
+                    if p.id == shard.peer_id
+                ),
+                None,
+            )
             if peer:
                 grpc_addr = f"{peer.host}:{peer.grpc_port}"
                 channel_options = [
-                    ('grpc.max_metadata_size', 64 * 1024 * 1024),
-                    ('grpc.max_send_message_length', -1),
-                    ('grpc.max_receive_message_length', -1),
-                    ('grpc.http2.max_frame_size', 16 * 1024 * 1024),
-                    ('grpc.http2.min_recv_ping_interval_without_data_ms', 300000),
+                    ("grpc.max_metadata_size", 64 * 1024 * 1024),
+                    ("grpc.max_send_message_length", -1),
+                    ("grpc.max_receive_message_length", -1),
+                    ("grpc.http2.max_frame_size", 16 * 1024 * 1024),
+                    ("grpc.http2.min_recv_ping_interval_without_data_ms", 300000),
                 ]
                 channel = grpc.insecure_channel(grpc_addr, options=channel_options)
                 stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
                 grpc_stubs.append(stub)
-                logger.info(f"✓ Connected to peer: {grpc_addr} (layers {shard.start_layer}-{shard.end_layer})")
-        
+                logger.info(
+                    f"✓ Connected to peer: {grpc_addr} (layers {shard.start_layer}-{shard.end_layer})"
+                )
+
         # Initialize model provider (coordinator loads NO layers, only coordinates)
         model_provider = MLXModelProvider(
             model_path=model_path,
             start_layer=None,  # No local layers
-            end_layer=None,    # No local layers
-            grpc_stubs=grpc_stubs
+            end_layer=None,  # No local layers
+            grpc_stubs=grpc_stubs,
         )
-        
+
         setup_complete = True
         logger.info("✓ API server ready - all inference will be distributed to peers")
         return {"plan": plan.to_dict()}
-    
+
     except Exception as e:
         logger.error(f"Setup failed: {e}", exc_info=True)
         raise
@@ -919,10 +967,7 @@ def main():
         description="MLX Sharding V2 - Zero-Configuration Distributed Inference API"
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Path to MLX model or HuggingFace repo"
+        "--model", type=str, required=True, help="Path to MLX model or HuggingFace repo"
     )
     # Note: API server is coordinator-only, it does not load model layers
     # Users should start separate peer processes with mlx-shard-peer
@@ -930,85 +975,81 @@ def main():
         "--grpc-port",
         type=int,
         default=50051,
-        help="gRPC port for local peer (default: 50051)"
+        help="gRPC port for local peer (default: 50051)",
     )
     parser.add_argument(
-        "--http-port",
-        type=int,
-        default=8080,
-        help="HTTP API port (default: 8080)"
+        "--http-port", type=int, default=8080, help="HTTP API port (default: 8080)"
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level"
+        help="Logging level",
     )
     parser.add_argument(
-        "--cache-limit-gb",
-        type=int,
-        default=None,
-        help="MLX cache limit in GB"
+        "--cache-limit-gb", type=int, default=None, help="MLX cache limit in GB"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
-    
+
     # Set cache limit
     if args.cache_limit_gb:
         mx.metal.set_cache_limit(args.cache_limit_gb * 1024 * 1024 * 1024)
-    
+
     # Load API keys
     global api_keys
     api_keys = load_api_keys()
     if api_keys:
-        logging.info(f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)")
+        logging.info(
+            f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)"
+        )
     else:
         logging.warning("⚠ No API keys configured - authentication disabled!")
-    
+
     # Run orchestrator setup in background
     async def startup():
         try:
             await run_orchestrator_setup(
                 model_path=args.model,
                 grpc_port=args.grpc_port,
-                http_port=args.http_port
+                http_port=args.http_port,
             )
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")
             sys.exit(1)
-    
+
     # Run setup before starting server
     asyncio.run(startup())
-    
+
     # Setup signal handlers
     def signal_handler(sig, frame):
         logging.info("\nShutting down server...")
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Start FastAPI server
     logging.info(f"🚀 Starting API server on 0.0.0.0:{args.http_port}")
     logging.info(f"   OpenAI API: http://0.0.0.0:{args.http_port}/v1")
     logging.info(f"   Health: http://0.0.0.0:{args.http_port}/health")
     logging.info(f"   Setup Status: http://0.0.0.0:{args.http_port}/v1/setup/status")
     logging.info("Press Ctrl+C to stop")
-    
+
     try:
         uvicorn.run(
             app,
             host="0.0.0.0",
             port=args.http_port,
             log_level=args.log_level.lower(),
-            access_log=False
+            access_log=False,
         )
     except KeyboardInterrupt:
         logging.info("\nServer stopped")
