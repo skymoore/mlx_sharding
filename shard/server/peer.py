@@ -62,17 +62,19 @@ class PeerServer:
         http_port: int = 8081,
         cache_dir: str = "~/.cache/mlx-sharding",
         bind_ip: Optional[str] = None,
+        max_ram_gb: Optional[float] = None,
     ):
         self.app = FastAPI(title="MLX Shard Peer", version="2.0.0")
         self.grpc_port = grpc_port
         self.http_port = http_port
         self.bind_ip = bind_ip
+        self.max_ram_gb = max_ram_gb
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # State
         self.discovery = PeerDiscovery(role="peer", bind_ip=bind_ip)
-        self.capabilities = SystemCapabilities.get_capabilities()
+        self.capabilities = SystemCapabilities.get_capabilities(max_ram_gb=max_ram_gb)
         self.state = "idle"  # idle, receiving_files, loading_model, ready, error
         self.model = None
         self.assignment: Optional[ShardAssignment] = None
@@ -90,6 +92,8 @@ class PeerServer:
         logger.info(f"Peer server initialized (gRPC={grpc_port}, HTTP={http_port})")
         if bind_ip:
             logger.info(f"Binding to IP: {bind_ip}")
+        if max_ram_gb:
+            logger.info(f"RAM limit: {max_ram_gb:.1f}GB (capped)")
         logger.info(f"Cache directory: {self.cache_dir}")
         logger.info(
             f"Capabilities: {self.capabilities['ram_available_gb']:.1f}GB RAM, "

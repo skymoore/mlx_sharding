@@ -40,7 +40,13 @@ import sys
     default=None,
     help="Specific IP address to bind to (auto-detect if not specified)",
 )
-def peer(grpc_port, http_port, cache_dir, log_level, bind_ip):
+@click.option(
+    "--max-ram-gb",
+    type=float,
+    default=None,
+    help="Maximum RAM in GB to use for this peer (limits available memory)",
+)
+def peer(grpc_port, http_port, cache_dir, log_level, bind_ip, max_ram_gb):
     """Start an MLX Shard Peer (zero-configuration worker node)."""
     from shard.server.peer import PeerServer
 
@@ -55,6 +61,7 @@ def peer(grpc_port, http_port, cache_dir, log_level, bind_ip):
         http_port=http_port,
         cache_dir=cache_dir,
         bind_ip=bind_ip,
+        max_ram_gb=max_ram_gb,
     )
 
     # Setup signal handlers

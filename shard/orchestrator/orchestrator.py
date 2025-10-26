@@ -151,6 +151,7 @@ class APIServerOrchestrator:
         discovery_timeout: float = 10.0,
         grpc_port: int = 50051,
         http_port: int = 8081,
+        resource_strategy: str = "fewest-nodes",
     ):
         """
         Initialize orchestrator.
@@ -162,6 +163,7 @@ class APIServerOrchestrator:
             discovery_timeout: Peer discovery timeout in seconds
             grpc_port: gRPC port for announcement (default: 50051)
             http_port: HTTP port for announcement (default: 8081)
+            resource_strategy: Resource allocation strategy - "fewest-nodes" or "proportionally"
         """
         self.model_name = model_name
         self.context_length = context_length
@@ -169,6 +171,7 @@ class APIServerOrchestrator:
         self.discovery_timeout = discovery_timeout
         self.grpc_port = grpc_port
         self.http_port = http_port
+        self.resource_strategy = resource_strategy
 
         self.progress = ProgressTracker()
         self.discovery: Optional[PeerDiscovery] = None
@@ -176,6 +179,7 @@ class APIServerOrchestrator:
         self.model_path: Optional[Path] = None
 
         logger.info(f"Initialized orchestrator for {model_name}")
+        logger.info(f"Resource strategy: {resource_strategy}")
 
     async def setup(self) -> ShardingPlan:
         """
@@ -271,7 +275,11 @@ class APIServerOrchestrator:
         # Create planner
         try:
             planner = ShardingPlanner(
-                str(self.model_path), peers, self.context_length, self.safety_margin
+                str(self.model_path),
+                peers,
+                self.context_length,
+                self.safety_margin,
+                self.resource_strategy,
             )
 
             plan = planner.calculate_sharding_plan()

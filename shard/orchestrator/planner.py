@@ -118,6 +118,7 @@ class ShardingPlanner:
         peers: List[PeerInfo],
         context_length: int = 8192,
         safety_margin: float = 0.10,
+        resource_strategy: str = "fewest-nodes",
     ):
         """
         Initialize sharding planner.
@@ -127,11 +128,13 @@ class ShardingPlanner:
             peers: List of available peers
             context_length: Target context length for KV cache estimation
             safety_margin: Safety margin as fraction of total memory (default 10%)
+            resource_strategy: Resource allocation strategy - "fewest-nodes" or "proportionally"
         """
         self.model_path_or_repo = model_path_or_repo
         self.peers = sorted(peers, key=lambda p: p.ram_available_gb, reverse=True)
         self.context_length = context_length
         self.safety_margin = safety_margin
+        self.resource_strategy = resource_strategy
 
         # Get model memory estimates
         self.memory_estimates = SystemCapabilities.estimate_model_memory(
@@ -239,7 +242,48 @@ class ShardingPlanner:
                 f"have {sum(p.ram_available_gb for p in self.peers):.1f}GB total."
             )
 
-        # Distribute layers across peers
+        # Distribute layers across peers based on strategy
+        if self.resource_strategy == "proportionally":
+            shards = self._distribute_proportionally(
+                peer_layer_capacity,
+                layer_memory_gb,
+                kv_cache_per_peer,
+                overhead_per_peer,
+            )
+        else:  # fewest-nodes (default)
+            shards = self._distribute_fewest_nodes(
+                peer_layer_capacity,
+                layer_memory_gb,
+                kv_cache_per_peer,
+                overhead_per_peer,
+            )
+
+        # Create plan
+        plan = ShardingPlan(
+            model_name=self.model_path_or_repo,
+            total_layers=self.total_layers,
+            context_length=self.context_length,
+            shards=shards,
+            total_memory_required_gb=total_memory_needed,
+            total_memory_available_gb=total_memory_available,
+            safety_margin_gb=total_memory_available * self.safety_margin,
+        )
+
+        logger.info(f"✓ Sharding plan created with {len(shards)} shard(s)")
+
+        return plan
+
+    def _distribute_fewest_nodes(
+        self,
+        peer_layer_capacity: List[int],
+        layer_memory_gb: float,
+        kv_cache_per_peer: float,
+        overhead_per_peer: float,
+    ) -> List[ShardAssignment]:
+        """
+        Distribute layers using fewest nodes strategy (greedy).
+        Uses minimum number of peers needed to fit the model.
+        """
         shards = []
         current_layer = 0
 
@@ -260,12 +304,9 @@ class ShardingPlanner:
             )
 
             # Determine optimal gRPC address (use discovery address for now)
-            # TODO: Integrate network path selection
             grpc_address = f"{peer.host}:{peer.grpc_port}"
 
             # Model loading treats end_layer as EXCLUSIVE (like Python range)
-            # So end_layer=68 means layers 0-67, end_layer=92 means layers 0-91
-            # No need to subtract 1 - the exclusive range prevents overlap
             is_last_peer = end_layer == self.total_layers
 
             shard = ShardAssignment(
@@ -273,7 +314,7 @@ class ShardingPlanner:
                 peer_address=peer.address,
                 grpc_address=grpc_address,
                 start_layer=current_layer,
-                end_layer=end_layer,  # Already exclusive, use directly
+                end_layer=end_layer,
                 estimated_memory_gb=shard_memory,
                 has_embedding=(current_layer == 0),
                 has_lm_head=is_last_peer,
@@ -282,8 +323,6 @@ class ShardingPlanner:
             shards.append(shard)
 
             # Log the actual layers being loaded
-            # Model code uses: start_layer <= i < end_layer (exclusive end)
-            # So end_layer=68 means layers 0-67 are loaded
             actual_last_layer = end_layer - 1
             num_layers_in_shard = end_layer - current_layer
             lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
@@ -297,20 +336,96 @@ class ShardingPlanner:
             if current_layer >= self.total_layers:
                 break
 
-        # Create plan
-        plan = ShardingPlan(
-            model_name=self.model_path_or_repo,
-            total_layers=self.total_layers,
-            context_length=self.context_length,
-            shards=shards,
-            total_memory_required_gb=total_memory_needed,
-            total_memory_available_gb=total_memory_available,
-            safety_margin_gb=total_memory_available * self.safety_margin,
+        return shards
+
+    def _distribute_proportionally(
+        self,
+        peer_layer_capacity: List[int],
+        layer_memory_gb: float,
+        kv_cache_per_peer: float,
+        overhead_per_peer: float,
+    ) -> List[ShardAssignment]:
+        """
+        Distribute layers proportionally across ALL available peers.
+        Each peer gets layers proportional to its share of total RAM.
+        """
+        import math
+
+        # Calculate total usable RAM across all peers
+        total_usable_ram = sum(
+            peer.ram_available_gb * (1 - self.safety_margin)
+            - kv_cache_per_peer
+            - overhead_per_peer
+            for peer in self.peers
         )
 
-        logger.info(f"✓ Sharding plan created with {len(shards)} shard(s)")
+        shards = []
+        current_layer = 0
 
-        return plan
+        for i, peer in enumerate(self.peers):
+            # Calculate this peer's share of total RAM
+            peer_usable_ram = (
+                peer.ram_available_gb * (1 - self.safety_margin)
+                - kv_cache_per_peer
+                - overhead_per_peer
+            )
+            ram_proportion = peer_usable_ram / total_usable_ram
+
+            # Calculate layers for this peer based on proportion
+            if i == len(self.peers) - 1:
+                # Last peer gets all remaining layers
+                end_layer = self.total_layers
+            else:
+                # Assign layers proportionally
+                layers_for_peer = math.floor(self.total_layers * ram_proportion)
+                # Ensure at least 1 layer if there are layers remaining
+                if layers_for_peer == 0 and current_layer < self.total_layers:
+                    layers_for_peer = 1
+                end_layer = min(current_layer + layers_for_peer, self.total_layers)
+
+            # Skip if no layers to assign
+            if current_layer >= end_layer:
+                continue
+
+            # Calculate memory for this shard
+            num_layers = end_layer - current_layer
+            shard_memory = (
+                layer_memory_gb * num_layers + kv_cache_per_peer + overhead_per_peer
+            )
+
+            # Determine optimal gRPC address
+            grpc_address = f"{peer.host}:{peer.grpc_port}"
+
+            is_last_peer = end_layer == self.total_layers
+
+            shard = ShardAssignment(
+                peer_id=peer.id,
+                peer_address=peer.address,
+                grpc_address=grpc_address,
+                start_layer=current_layer,
+                end_layer=end_layer,
+                estimated_memory_gb=shard_memory,
+                has_embedding=(current_layer == 0),
+                has_lm_head=is_last_peer,
+            )
+
+            shards.append(shard)
+
+            # Log the assignment
+            actual_last_layer = end_layer - 1
+            num_layers_in_shard = end_layer - current_layer
+            lm_head_note = " [HAS LM HEAD]" if is_last_peer else ""
+            logger.info(
+                f"Assigned layers {current_layer}-{actual_last_layer} ({num_layers_in_shard} layers) to peer {peer.id[:8]} "
+                f"({shard_memory:.1f}GB, {ram_proportion*100:.1f}% of RAM){lm_head_note}"
+            )
+
+            current_layer = end_layer
+
+            if current_layer >= self.total_layers:
+                break
+
+        return shards
 
     def optimize_network_paths(
         self, plan: ShardingPlan, coordinator_interfaces: List
@@ -332,7 +447,7 @@ class ShardingPlanner:
                 continue
 
             # Convert peer network interfaces from dict to NetworkInterface objects
-            from .network import NetworkInterface
+            from shard.zeroconf.network import NetworkInterface
 
             peer_interfaces = [
                 NetworkInterface.from_dict(iface_data)

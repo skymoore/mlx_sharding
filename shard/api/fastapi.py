@@ -981,7 +981,11 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
 
 
 async def run_orchestrator_setup(
-    model_path: str, grpc_port: int, http_port: int, custom_chat_template: Optional[str] = None
+    model_path: str,
+    grpc_port: int,
+    http_port: int,
+    custom_chat_template: Optional[str] = None,
+    resource_strategy: str = "fewest-nodes",
 ) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider, orchestrator_instance, discovered_peers
@@ -995,7 +999,10 @@ async def run_orchestrator_setup(
 
     # Create orchestrator (coordinator-only mode - no local layers)
     orchestrator = Orchestrator(
-        model_name=model_path, grpc_port=grpc_port, http_port=http_port
+        model_name=model_path,
+        grpc_port=grpc_port,
+        http_port=http_port,
+        resource_strategy=resource_strategy,
     )
     
     # Store orchestrator globally for cleanup

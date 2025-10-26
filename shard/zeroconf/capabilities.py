@@ -8,7 +8,7 @@ import platform
 import logging
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from mlx_lm.utils import hf_repo_to_path
 
 logger = logging.getLogger(__name__)
@@ -18,18 +18,27 @@ class SystemCapabilities:
     """Detect and report system capabilities."""
     
     @staticmethod
-    def get_capabilities() -> Dict[str, Any]:
+    def get_capabilities(max_ram_gb: Optional[float] = None) -> Dict[str, Any]:
         """
         Get current system capabilities.
+        
+        Args:
+            max_ram_gb: Optional maximum RAM limit in GB (caps available RAM)
         
         Returns:
             Dictionary with system information
         """
         mem = psutil.virtual_memory()
         
+        ram_available_gb = round(mem.available / (1024**3), 2)
+        
+        # Apply max RAM limit if specified
+        if max_ram_gb is not None and max_ram_gb > 0:
+            ram_available_gb = min(ram_available_gb, max_ram_gb)
+        
         capabilities = {
             "ram_total_gb": round(mem.total / (1024**3), 2),
-            "ram_available_gb": round(mem.available / (1024**3), 2),
+            "ram_available_gb": ram_available_gb,
             "ram_used_gb": round(mem.used / (1024**3), 2),
             "cpu_cores": psutil.cpu_count(logical=False) or 1,
             "cpu_threads": psutil.cpu_count(logical=True) or 1,
