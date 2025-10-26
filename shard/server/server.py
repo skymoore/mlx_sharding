@@ -6,6 +6,7 @@ import mlx.core as mx
 import threading
 import time
 import logging
+from mlx.utils import tree_reduce
 
 # Setup logging
 logging.basicConfig(
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 MODEL = None
 CACHES = {}  # session_id -> list[KVCache]
+
+# Prefill configuration for chunking large prompts
+PREFILL_STEP_SIZE = 2048
 
 # Global chunk buffer
 CHUNK_BUFFERS = (
@@ -129,6 +133,9 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
 
             # Process the tensor (same for both paths)
             if MODEL is not None:
+                # Print progress indicator
+                print(".", end="", flush=True)
+                
                 # Pipeline parallelism: Each peer maintains its OWN cache in memory
                 # The cache persists across tokens within a generation
                 # ResetCache RPC clears it between generations
@@ -139,7 +146,40 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                     reset_cache(session_id)
                 cache_to_use = CACHES[session_id]
 
-                processed_tensor = MODEL(tensor, cache=cache_to_use)
+                # 🔥 NEW: Prefill chunking for large inputs (like initial prompt)
+                # This prevents OOM on long prompts by processing in chunks
+                if tensor.shape[1] > PREFILL_STEP_SIZE:
+                    logger.info(f"Chunking large input: {tensor.shape[1]} tokens")
+                    
+                    # Process all but the last chunk
+                    while tensor.shape[1] > PREFILL_STEP_SIZE:
+                        chunk = tensor[:, :PREFILL_STEP_SIZE]
+                        MODEL(chunk, cache=cache_to_use)
+                        mx.eval([c.state for c in cache_to_use])
+                        tensor = tensor[:, PREFILL_STEP_SIZE:]
+                        mx.clear_cache()
+                        print(".", end="", flush=True)  # Progress for each chunk
+                    
+                    # Process remaining tokens (if any)
+                    if tensor.shape[1] > 0:
+                        processed_tensor = MODEL(tensor, cache=cache_to_use)
+                    else:
+                        # All tokens were processed in chunks, return dummy tensor
+                        # This shouldn't happen but handle it gracefully
+                        processed_tensor = mx.zeros((1, 1, MODEL.args.hidden_size))
+                else:
+                    # Normal single-token or small batch processing
+                    processed_tensor = MODEL(tensor, cache=cache_to_use)
+
+                # 🔥 NEW: Track request count for periodic cache clearing
+                if not hasattr(cache_to_use, '_request_count'):
+                    cache_to_use._request_count = 0
+                cache_to_use._request_count += 1
+                
+                # Clear cache every 256 requests to prevent memory accumulation
+                if cache_to_use._request_count % 256 == 0:
+                    mx.clear_cache()
+                    logger.debug(f"Cleared cache after {cache_to_use._request_count} requests")
 
                 # NEVER reduce to last token on the peer side
                 # The coordinator will extract the last position for sampling
@@ -194,6 +234,35 @@ def serve(
 
     # Model loaded successfully
     logger.info(f"✓ Model loaded: {type(MODEL).__name__}")
+
+    # 🔥 NEW: Set wired limit for optimal Metal memory management
+    # This is critical for preventing memory pressure and performance issues
+    if mx.metal.is_available():
+        try:
+            model_bytes = tree_reduce(
+                lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+                MODEL,
+                0
+            )
+            max_rec_size = mx.metal.device_info()["max_recommended_working_set_size"]
+            
+            model_mb = model_bytes // (1024 * 1024)
+            max_rec_mb = max_rec_size // (1024 * 1024)
+            
+            if model_bytes > 0.9 * max_rec_size:
+                logger.warning(
+                    f"Model requires {model_mb} MB which is close to the "
+                    f"maximum recommended size of {max_rec_mb} MB. "
+                    "This may impact performance."
+                )
+            
+            mx.set_wired_limit(max_rec_size)
+            logger.info(f"✓ Wired limit set to {max_rec_mb} MB for peer")
+            logger.info(f"✓ Model size: {model_mb} MB")
+        except Exception as e:
+            logger.warning(f"Could not set wired limit: {e}")
+    else:
+        logger.info("Metal not available, skipping wired limit setup")
 
     # No initial reset needed - caches created per session
 

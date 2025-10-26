@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE_MB = 2
 CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
+# 🔥 NEW: Dedicated stream for generation (like mlx_lm)
+# This enables better async execution and memory management
+generation_stream = mx.new_stream(mx.default_device())
+
 MODEL_REMAPPING = {
     "mistral": "llama",  # mistral is compatible with llama
     "phi-msft": "phixtral",
@@ -367,46 +371,55 @@ def create_coordinator_generate_step(grpc_stubs: List):
             """Process one generation step through the pipeline."""
             nonlocal repetition_context
 
-            # Ensure y is int32 token IDs with shape (batch, seq_len)
-            if y.dtype != mx.int32:
-                y = y.astype(mx.int32)
-            if y.ndim == 0:  # scalar
-                y = y.reshape(1, 1)
-            elif y.ndim == 1:  # (seq_len,)
-                y = y.reshape(1, -1)
+            # 🔥 NEW: Use dedicated generation stream for better async execution
+            with mx.stream(generation_stream):
+                # Ensure y is int32 token IDs with shape (batch, seq_len)
+                if y.dtype != mx.int32:
+                    y = y.astype(mx.int32)
+                if y.ndim == 0:  # scalar
+                    y = y.reshape(1, 1)
+                elif y.ndim == 1:  # (seq_len,)
+                    y = y.reshape(1, -1)
 
-            # Send through pipeline
-            tensor = y
-            for i, stub in enumerate(grpc_stubs):
-                response = send_tensor(stub, tensor, session_id=session_id)
-                tensor = response_to_mlx_array(response)
-                if tensor is None:
-                    raise ValueError(f"Peer {i} returned None")
+                # Send through pipeline
+                tensor = y
+                for i, stub in enumerate(grpc_stubs):
+                    response = send_tensor(stub, tensor, session_id=session_id)
+                    tensor = response_to_mlx_array(response)
+                    if tensor is None:
+                        raise ValueError(f"Peer {i} returned None")
 
-            # tensor is now logits from last peer
-            logits = tensor[:, -1, :]
+                # tensor is now logits from last peer
+                logits = tensor[:, -1, :]
 
-            # Apply logits processors (repetition penalty, logit bias, etc.)
-            for processor in logits_processors:
-                logits = processor(mx.array(repetition_context), logits)
+                # Apply logits processors (repetition penalty, logit bias, etc.)
+                for processor in logits_processors:
+                    logits = processor(mx.array(repetition_context), logits)
 
-            # Sample next token
-            token, logprobs = sample(logits)
-            if repetition_penalty:
-                repetition_context.append(token.item())
-            if repetition_context_size:
-                if len(repetition_context) > repetition_context_size:
-                    repetition_context = repetition_context[-repetition_context_size:]
+                # Sample next token
+                token, logprobs = sample(logits)
+                if repetition_penalty:
+                    repetition_context.append(token.item())
+                if repetition_context_size:
+                    if len(repetition_context) > repetition_context_size:
+                        repetition_context = repetition_context[-repetition_context_size:]
 
-            return token, logprobs.squeeze(0)
+                return token, logprobs.squeeze(0)
 
         # Generate tokens
         y, logprobs = _step(y)
         mx.async_eval(y)
+        n = 0
         while True:
             next_y, next_logprobs = _step(y)
             mx.async_eval(next_y)
             yield y.item(), logprobs
+            
+            # 🔥 NEW: Periodic cache clearing to prevent memory accumulation
+            n += 1
+            if n % 256 == 0:
+                mx.clear_cache()
+            
             y, logprobs = next_y, next_logprobs
 
     return generate_step

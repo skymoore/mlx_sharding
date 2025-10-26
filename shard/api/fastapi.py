@@ -568,7 +568,7 @@ async def generate_chat_completion(
 
     finish_reason = "length"
 
-    for (token, _), _ in zip(
+    for (token, _), n in zip(
         model_provider.generate(
             prompt,
             temperature=request.temperature,
@@ -599,6 +599,10 @@ async def generate_chat_completion(
         if stop_found:
             finish_reason = "stop"
             break
+        
+        # 🔥 NEW: Periodic cache clearing to prevent memory accumulation
+        if n % 256 == 0:
+            mx.clear_cache()
 
     detokenizer.finalize()
     text = detokenizer.text
@@ -676,7 +680,7 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
     finish_reason = "length"
 
     try:
-        for (token, _), _ in zip(
+        for (token, _), n in zip(
             model_provider.generate(
                 prompt,
                 temperature=request.temperature,
@@ -706,6 +710,10 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
 
             # Get the segment to send
             text = detokenizer.last_segment
+            
+            # 🔥 NEW: Periodic cache clearing to prevent memory accumulation
+            if n % 256 == 0:
+                mx.clear_cache()
 
             # Check if this segment contains a stop sequence
             if text:
