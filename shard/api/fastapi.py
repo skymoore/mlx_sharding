@@ -128,7 +128,7 @@ class GRPCConnectionPool:
             ("grpc.max_metadata_size", 64 * 1024 * 1024),
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
-            ("grpc.http2.max_frame_size", 4 * 1024 * 1024),  # 4MB frames (reduced from 16MB to avoid "Message too long" errors)
+            ("grpc.http2.max_frame_size", 4 * 1024 * 1024),
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 300000),
         ]
         logger.info(f"✓ Connection pool initialized with {len(peer_addresses)} peers")
@@ -306,8 +306,8 @@ class MLXModelProvider:
         stop_sequences = self.get_default_stop_sequences()
         stop_token_ids = []
 
-        logging.info(f"🛑 Getting stop token IDs for model_type: {self.model_type}")
-        logging.info(f"🛑 Stop sequences: {stop_sequences}")
+        logging.debug(f"🛑 Getting stop token IDs for model_type: {self.model_type}")
+        logging.debug(f"🛑 Stop sequences: {stop_sequences}")
 
         for seq in stop_sequences:
             try:
@@ -316,7 +316,7 @@ class MLXModelProvider:
                 # If it's a single token, add it to our list
                 if len(tokens) == 1:
                     stop_token_ids.append(tokens[0])
-                    logging.info(f"🛑 Added stop token: {seq} -> {tokens[0]}")
+                    logging.debug(f"🛑 Added stop token: {seq} -> {tokens[0]}")
                 else:
                     logging.warning(f"🛑 Skipped multi-token sequence: {seq} -> {tokens}")
             except Exception as e:
@@ -325,9 +325,9 @@ class MLXModelProvider:
         # Always include EOS token
         if self.tokenizer.eos_token_id is not None:
             stop_token_ids.append(self.tokenizer.eos_token_id)
-            logging.info(f"🛑 Added EOS token: {self.tokenizer.eos_token_id}")
+            logging.debug(f"🛑 Added EOS token: {self.tokenizer.eos_token_id}")
 
-        logging.info(f"🛑 Final stop_token_ids: {stop_token_ids}")
+        logging.debug(f"🛑 Final stop_token_ids: {stop_token_ids}")
         return stop_token_ids
 
     def generate(self, prompt: mx.array, **kwargs):
@@ -1075,14 +1075,14 @@ async def shutdown_coordinator():
             logger.info("✓ Peers unclaimed successfully")
         except Exception as e:
             logger.error(f"Error unclaiming peers: {e}", exc_info=True)
-    
+
     if orchestrator_instance:
         try:
             orchestrator_instance.cleanup()
             logger.info("✓ Orchestrator cleanup complete")
         except Exception as e:
             logger.error(f"Error during orchestrator cleanup: {e}", exc_info=True)
-    
+
     logger.info("=" * 80)
     logger.info("✓ SHUTDOWN COMPLETE")
     logger.info("=" * 80)

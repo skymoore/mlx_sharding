@@ -5,6 +5,13 @@ from shard.server.utils import bytes_to_tensor, load_model, tensor_to_bytes
 import mlx.core as mx
 import threading
 import time
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 MODEL = None
 CACHES = {}  # session_id -> list[KVCache]
@@ -31,7 +38,7 @@ def cleanup_stale_chunks():
             ]
 
             for tid in stale_ids:
-                print(f"Cleaning up stale chunks for tensor_id: {tid}")
+                logger.info(f"Cleaning up stale chunks for tensor_id: {tid}")
                 del CHUNK_BUFFERS[tid]
 
 
@@ -44,7 +51,7 @@ def reset_cache(session_id):
         raise ValueError(
             "Model does not have make_cache() method. Please use a compatible model."
         )
-    print(f"Cache reset for session {session_id}")
+    logger.info(f"Cache reset for session {session_id}")
 
 
 class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
@@ -156,10 +163,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 )
 
         except Exception as e:
-            print(f"Error processing tensor: {e}")
-            import traceback
-
-            traceback.print_exc()
+            logger.error(f"Error processing tensor: {e}", exc_info=True)
             return mlx_tensor_pb2.TensorResponse(
                 success=False, message=str(e), tensor=None
             )
@@ -171,7 +175,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                 success=True, message="Cache reset successfully"
             )
         except Exception as e:
-            print(f"Error resetting cache: {e}")
+            logger.error(f"Error resetting cache: {e}", exc_info=True)
             return mlx_tensor_pb2.ResetCacheResponse(
                 success=False, message=f"Error resetting cache: {str(e)}"
             )
@@ -189,14 +193,14 @@ def serve(
         MODEL = load_model(model_path, start_layer=start_layer, end_layer=end_layer)
 
     # Model loaded successfully
-    print(f"✓ Model loaded: {type(MODEL).__name__}")
+    logger.info(f"✓ Model loaded: {type(MODEL).__name__}")
 
     # No initial reset needed - caches created per session
 
     # Start cleanup thread
     cleanup_thread = threading.Thread(target=cleanup_stale_chunks, daemon=True)
     cleanup_thread.start()
-    print("Started chunk cleanup thread")
+    logger.info("Started chunk cleanup thread")
 
     server_options = [
         ("grpc.max_metadata_size", 64 * 1024 * 1024),  # 64MB metadata
@@ -213,10 +217,10 @@ def serve(
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()
-    print(f"Server started, listening on 0.0.0.0:{port}")
+    logger.info(f"Server started, listening on 0.0.0.0:{port}")
     if start_layer is not None or end_layer is not None:
         # end_layer is exclusive, so actual last layer is end_layer-1
         actual_start = start_layer or 0
         actual_end = (end_layer - 1) if end_layer else "end"
-        print(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
+        logger.info(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
     server.wait_for_termination()

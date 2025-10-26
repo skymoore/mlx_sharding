@@ -26,7 +26,7 @@ from shard.server.utils import load_model
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s"
 )
 logger = logging.getLogger(__name__)
 

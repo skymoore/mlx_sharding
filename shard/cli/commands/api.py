@@ -65,7 +65,7 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
     # Setup logging
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
-        format="%(asctime)s - %(levelname)s - %(message)s",
+        format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s",
     )
 
     # Set cache limit
