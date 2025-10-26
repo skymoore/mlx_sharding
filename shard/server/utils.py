@@ -83,15 +83,16 @@ def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = N
 
 def send_tensor(stub, tensor: mx.array, session_id: str = None):
     """Send tensor, automatically chunking if needed."""
+    import sys
+    
     tensor_bytes = tensor_to_bytes(tensor)
     message_size_mb = len(tensor_bytes) / (1024 * 1024)
 
     # Small tensor - send directly (backward compatible)
     if len(tensor_bytes) < CHUNK_SIZE_BYTES:
-        logger.info(
-            f"📤 Sending tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB (direct), session={session_id}"
-        )
-
+        # Print progress indicator
+        print(".", end="", flush=True)
+        
         tensor_message = mlx_tensor_pb2.Tensor(
             tensor_data=tensor_bytes, shape=list(tensor.shape), dtype=str(tensor.dtype)
         )
@@ -111,15 +112,13 @@ def send_tensor(stub, tensor: mx.array, session_id: str = None):
         tensor_id = str(uuid.uuid4())
         total_chunks = (len(tensor_bytes) + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
 
-        logger.info(
-            f"📦 Chunking tensor: shape={tensor.shape}, size={message_size_mb:.2f}MB into {total_chunks} chunks"
-        )
-
         for chunk_idx in range(total_chunks):
+            # Print progress indicator
+            print(".", end="", flush=True)
+            
             start = chunk_idx * CHUNK_SIZE_BYTES
             end = min(start + CHUNK_SIZE_BYTES, len(tensor_bytes))
             chunk_data = tensor_bytes[start:end]
-            chunk_size_mb = len(chunk_data) / (1024 * 1024)
 
             chunk_message = mlx_tensor_pb2.TensorChunk(
                 tensor_id=tensor_id,
@@ -134,14 +133,10 @@ def send_tensor(stub, tensor: mx.array, session_id: str = None):
             )
 
             try:
-                logger.info(
-                    f"  📤 Sending chunk {chunk_idx+1}/{total_chunks} ({chunk_size_mb:.2f}MB)"
-                )
                 response = stub.SendTensor(request)
 
                 # Only the last chunk returns the processed tensor
                 if chunk_idx == total_chunks - 1:
-                    logger.info(f"✅ All chunks sent successfully")
                     return response
 
             except Exception as e:
@@ -333,7 +328,6 @@ def create_coordinator_generate_step(grpc_stubs: List):
 
         # Generate unique session ID for this generation
         session_id = str(uuid.uuid4())
-        logger.info(f"🆔 Starting generation with session_id: {session_id}")
 
         # Reset all peer caches at start of generation
         for stub in grpc_stubs:
@@ -380,38 +374,16 @@ def create_coordinator_generate_step(grpc_stubs: List):
             elif y.ndim == 1:  # (seq_len,)
                 y = y.reshape(1, -1)
 
-            logger.info(
-                f"🎯 Coordinator sending to pipeline: shape={y.shape}, dtype={y.dtype}"
-            )
-
             # Send through pipeline
             tensor = y
             for i, stub in enumerate(grpc_stubs):
-                logger.info(
-                    f"  → Sending to peer {i}: shape={tensor.shape}, dtype={tensor.dtype}"
-                )
                 response = send_tensor(stub, tensor, session_id=session_id)
                 tensor = response_to_mlx_array(response)
                 if tensor is None:
                     raise ValueError(f"Peer {i} returned None")
-                logger.info(
-                    f"  ← Received from peer {i}: shape={tensor.shape}, dtype={tensor.dtype}"
-                )
 
             # tensor is now logits from last peer
-            logger.info(
-                f"🎯 Final tensor from pipeline: shape={tensor.shape}, dtype={tensor.dtype}"
-            )
             logits = tensor[:, -1, :]
-            logger.info(f"🎯 Extracted logits: shape={logits.shape}")
-            logger.info(
-                f"🔍 Logits stats: min={logits.min().item():.4f}, max={logits.max().item():.4f}, mean={logits.mean().item():.4f}, std={logits.std().item():.4f}"
-            )
-            logger.info(
-                f"🔍 Has NaN: {mx.isnan(logits).any().item()}, Has Inf: {mx.isinf(logits).any().item()}"
-            )
-            logger.info(f"🔍 Top 5 token IDs: {mx.argsort(logits[0])[-5:].tolist()}")
-            logger.info(f"🔍 Bottom 5 token IDs: {mx.argsort(logits[0])[:5].tolist()}")
 
             # Apply logits processors (repetition penalty, logit bias, etc.)
             for processor in logits_processors:
@@ -419,7 +391,6 @@ def create_coordinator_generate_step(grpc_stubs: List):
 
             # Sample next token
             token, logprobs = sample(logits)
-            logger.info(f"🎯 Sampled token: {token.item()}")
             if repetition_penalty:
                 repetition_context.append(token.item())
             if repetition_context_size:

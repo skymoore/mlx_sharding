@@ -2,7 +2,6 @@
 import click
 import logging
 import asyncio
-import signal
 import sys
 import mlx.core as mx
 import uvicorn
@@ -83,23 +82,18 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
             logging.error(f"Fatal setup error: {e}")
             sys.exit(1)
 
-    # Run setup before starting server
-    asyncio.run(startup())
+    # Register startup and shutdown events with FastAPI
+    @app.on_event("startup")
+    async def on_startup():
+        await startup()
 
-    # Setup signal handlers for graceful shutdown
-    def signal_handler(sig, frame):
-        logging.info("\n🛑 Received shutdown signal...")
-        # Run async shutdown
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        logging.info("\n🛑 Shutting down server...")
         try:
-            asyncio.run(shutdown_coordinator())
+            await shutdown_coordinator()
         except Exception as e:
             logging.error(f"Error during shutdown: {e}")
-        finally:
-            logging.info("Exiting...")
-            sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
 
     # Start FastAPI server
     logging.info(f"🚀 Starting API server on 0.0.0.0:{http_port}")
@@ -108,20 +102,10 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
     logging.info(f"   Setup Status: http://0.0.0.0:{http_port}/v1/setup/status")
     logging.info("Press Ctrl+C to stop")
 
-    try:
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=http_port,
-            log_level=log_level.lower(),
-            access_log=False,
-        )
-    except KeyboardInterrupt:
-        logging.info("\n🛑 Keyboard interrupt received...")
-        try:
-            asyncio.run(shutdown_coordinator())
-        except Exception as e:
-            logging.error(f"Error during shutdown: {e}")
-        finally:
-            logging.info("Server stopped")
-            sys.exit(0)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=http_port,
+        log_level=log_level.lower(),
+        access_log=False,
+    )

@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import uuid
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Optional, Union, Dict, Any, Tuple
 from pathlib import Path
 
 # Suppress verbose gRPC error logs
@@ -109,6 +109,49 @@ discovered_peers = []  # Store peers for unclaiming
 security = HTTPBearer(auto_error=False)
 
 
+class GRPCConnectionPool:
+    """
+    Connection pool for creating isolated gRPC stubs per request.
+    Enables true concurrency by preventing shared state between requests.
+    """
+
+    def __init__(self, peer_addresses: List[Tuple[str, int]]):
+        """
+        Initialize connection pool with peer addresses.
+
+        Args:
+            peer_addresses: List of (host, port) tuples for each peer
+        """
+        self.peer_addresses = peer_addresses
+        self.channel_options = [
+            ("grpc.max_metadata_size", 64 * 1024 * 1024),
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
+            ("grpc.http2.max_frame_size", 16 * 1024 * 1024),
+            ("grpc.http2.min_recv_ping_interval_without_data_ms", 300000),
+        ]
+        logger.info(f"✓ Connection pool initialized with {len(peer_addresses)} peers")
+
+    def create_stubs_for_request(self) -> Tuple[List, List]:
+        """
+        Create fresh gRPC stubs for a single request.
+        Each request gets isolated channels to prevent concurrent interference.
+
+        Returns:
+            Tuple of (stubs, channels) - caller must close channels after use
+        """
+        stubs = []
+        channels = []
+        for host, port in self.peer_addresses:
+            channel = grpc.insecure_channel(
+                f"{host}:{port}", options=self.channel_options
+            )
+            stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
+            stubs.append(stub)
+            channels.append(channel)
+        return stubs, channels
+
+
 def load_api_keys() -> set[str]:
     """Load API keys from environment variable or file."""
     keys = set()
@@ -180,12 +223,12 @@ class MLXModelProvider:
         model_path: str,
         start_layer: Optional[int],
         end_layer: Optional[int],
-        grpc_stubs: List,
+        connection_pool: Optional[GRPCConnectionPool] = None,
     ):
         self.model_path = model_path
         self.start_layer = start_layer
         self.end_layer = end_layer
-        self.grpc_stubs = grpc_stubs
+        self.connection_pool = connection_pool
 
         # Load tokenizer (always needed)
         tokenizer_path = (
@@ -201,7 +244,7 @@ class MLXModelProvider:
                 "Coordinator-only mode: no local model, pipeline coordination only"
             )
             self.model = None
-            self.generate_step = create_coordinator_generate_step(grpc_stubs)
+            # Don't create generate_step here - will be created per-request
 
             # Get model type from config for tool calling and stop tokens
             config_path = tokenizer_path / "config.json"
@@ -212,12 +255,12 @@ class MLXModelProvider:
             else:
                 self.model_type = "unknown"
         else:
-            # Peer mode: load local layers
+            # Peer mode: load local layers (not used in coordinator-only mode)
             logging.info(f"Peer mode: loading layers {start_layer}-{end_layer}")
             self.model = load_model(
                 model_path, start_layer=start_layer, end_layer=end_layer
             )
-            self.generate_step = create_generate_step_with_grpc(grpc_stubs)
+            # For peer mode, would need stubs - not implemented in this coordinator-only setup
             self.model_type = getattr(self.model, "model_type", "unknown")
 
         # Model info
@@ -279,26 +322,41 @@ class MLXModelProvider:
         return stop_token_ids
 
     def generate(self, prompt: mx.array, **kwargs):
-        """Generate tokens using the distributed model."""
-        # Coordinator mode doesn't need model parameter
-        if self.model is None:
-            return self.generate_step(
-                prompt=prompt,
-                temp=kwargs.get("temperature", 0.7),
-                top_p=kwargs.get("top_p", 1.0),
-                repetition_penalty=kwargs.get("repetition_penalty", 1.0),
-                repetition_context_size=kwargs.get("repetition_context_size", 20),
-            )
-        else:
-            # Peer mode needs model parameter
-            return self.generate_step(
-                prompt=prompt,
-                model=self.model,
-                temp=kwargs.get("temperature", 0.7),
-                top_p=kwargs.get("top_p", 1.0),
-                repetition_penalty=kwargs.get("repetition_penalty", 1.0),
-                repetition_context_size=kwargs.get("repetition_context_size", 20),
-            )
+        """
+        Generate tokens using the distributed model.
+        Creates fresh gRPC stubs per request for true concurrency.
+        """
+        # Get fresh stubs from connection pool for this request
+        if self.connection_pool is None:
+            raise ValueError("Connection pool not initialized")
+        
+        grpc_stubs, channels = self.connection_pool.create_stubs_for_request()
+        
+        # Create generate_step function with fresh stubs
+        generate_step = create_coordinator_generate_step(grpc_stubs)
+        
+        # Wrap the generator to close channels after exhaustion
+        def generator_with_cleanup():
+            try:
+                # Yield from the actual generator
+                for item in generate_step(
+                    prompt=prompt,
+                    temp=kwargs.get("temperature", 0.7),
+                    top_p=kwargs.get("top_p", 1.0),
+                    repetition_penalty=kwargs.get("repetition_penalty", 1.0),
+                    repetition_context_size=kwargs.get("repetition_context_size", 20),
+                ):
+                    yield item
+            finally:
+                # Clean up channels after generator is exhausted or interrupted
+                for channel in channels:
+                    try:
+                        channel.close()
+                    except Exception as e:
+                        logging.warning(f"Error closing channel: {e}")
+        
+        return generator_with_cleanup()
+
 
 
 @app.get("/health")
@@ -325,6 +383,7 @@ async def list_models(
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
 
+    logger.info(f"📋 /v1/models called - returning model: {model_provider.model_name}")
     return ModelList(
         data=[
             ModelInfo(
@@ -361,6 +420,21 @@ async def chat_completions(
 ):
     """Handle chat completion requests with tool calling support."""
     import json
+
+    # Log the complete incoming request from OpenWebUI
+    logger.info("=" * 80)
+    logger.info("📥 INCOMING REQUEST TO /v1/chat/completions")
+    logger.info("=" * 80)
+    logger.info(f"Request JSON: {json.dumps(request.dict(), indent=2)}")
+    logger.info(f"Model requested: {request.model}")
+    logger.info(f"Number of messages: {len(request.messages)}")
+    logger.info(f"Stream: {request.stream}")
+    logger.info(f"Temperature: {request.temperature}")
+    logger.info(f"Max tokens: {request.max_tokens}")
+    logger.info("Messages:")
+    for i, msg in enumerate(request.messages):
+        logger.info(f"  [{i}] {msg.role}: {msg.content[:100]}...")
+    logger.info("=" * 80)
 
     if not setup_complete:
         raise HTTPException(status_code=503, detail="Setup not complete")
@@ -931,8 +1005,8 @@ async def run_orchestrator_setup(
             "coordinator_only": True,
         }
 
-        # Create gRPC stubs for ALL peers (coordinator doesn't load any layers)
-        grpc_stubs = []
+        # Extract peer addresses for connection pool
+        peer_addresses = []
         for shard in plan.shards:
             # Get peer info from orchestrator's discovered peers
             peer = next(
@@ -944,27 +1018,20 @@ async def run_orchestrator_setup(
                 None,
             )
             if peer:
-                grpc_addr = f"{peer.host}:{peer.grpc_port}"
-                channel_options = [
-                    ("grpc.max_metadata_size", 64 * 1024 * 1024),
-                    ("grpc.max_send_message_length", -1),
-                    ("grpc.max_receive_message_length", -1),
-                    ("grpc.http2.max_frame_size", 16 * 1024 * 1024),
-                    ("grpc.http2.min_recv_ping_interval_without_data_ms", 300000),
-                ]
-                channel = grpc.insecure_channel(grpc_addr, options=channel_options)
-                stub = mlx_tensor_pb2_grpc.MLXTensorServiceStub(channel)
-                grpc_stubs.append(stub)
+                peer_addresses.append((peer.host, peer.grpc_port))
                 logger.info(
-                    f"✓ Connected to peer: {grpc_addr} (layers {shard.start_layer}-{shard.end_layer})"
+                    f"✓ Registered peer: {peer.host}:{peer.grpc_port} (layers {shard.start_layer}-{shard.end_layer})"
                 )
+
+        # Create connection pool for per-request stub creation
+        connection_pool = GRPCConnectionPool(peer_addresses)
 
         # Initialize model provider (coordinator loads NO layers, only coordinates)
         model_provider = MLXModelProvider(
             model_path=model_path,
             start_layer=None,  # No local layers
             end_layer=None,  # No local layers
-            grpc_stubs=grpc_stubs,
+            connection_pool=connection_pool,
         )
 
         setup_complete = True
