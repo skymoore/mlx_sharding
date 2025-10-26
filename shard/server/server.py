@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = None
 CACHES = {}  # session_id -> list[KVCache]
+CACHE_REQUEST_COUNTS = {}  # session_id -> int (track requests per session)
 
 # Prefill configuration for chunking large prompts
 PREFILL_STEP_SIZE = 2048
@@ -51,6 +52,7 @@ def reset_cache(session_id):
         raise ValueError("No session_id provided")
     if hasattr(MODEL, "make_cache"):
         CACHES[session_id] = MODEL.make_cache()
+        CACHE_REQUEST_COUNTS[session_id] = 0  # Reset request count
     else:
         raise ValueError(
             "Model does not have make_cache() method. Please use a compatible model."
@@ -172,14 +174,14 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                     processed_tensor = MODEL(tensor, cache=cache_to_use)
 
                 # 🔥 NEW: Track request count for periodic cache clearing
-                if not hasattr(cache_to_use, '_request_count'):
-                    cache_to_use._request_count = 0
-                cache_to_use._request_count += 1
+                if session_id not in CACHE_REQUEST_COUNTS:
+                    CACHE_REQUEST_COUNTS[session_id] = 0
+                CACHE_REQUEST_COUNTS[session_id] += 1
                 
                 # Clear cache every 256 requests to prevent memory accumulation
-                if cache_to_use._request_count % 256 == 0:
+                if CACHE_REQUEST_COUNTS[session_id] % 256 == 0:
                     mx.clear_cache()
-                    logger.debug(f"Cleared cache after {cache_to_use._request_count} requests")
+                    logger.debug(f"Cleared cache after {CACHE_REQUEST_COUNTS[session_id]} requests for session {session_id}")
 
                 # NEVER reduce to last token on the peer side
                 # The coordinator will extract the last position for sampling

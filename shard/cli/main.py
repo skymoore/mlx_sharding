@@ -15,6 +15,7 @@ import click
 from shard.cli.commands.api import api
 from shard.cli.commands.peer import peer
 from shard.cli.commands.generate import generate
+from shard.cli.commands.chat import chat
 from shard.cli.commands.shard_weights import shard_weights
 from shard.cli.commands.api_key import api_key
 from shard.cli.commands.template import template
@@ -36,6 +37,7 @@ def utils():
 # Register commands
 cli.add_command(api)
 cli.add_command(peer)
+cli.add_command(chat)
 utils.add_command(generate)
 utils.add_command(shard_weights)
 utils.add_command(api_key)
