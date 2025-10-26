@@ -17,6 +17,7 @@ from shard.cli.commands.peer import peer
 from shard.cli.commands.generate import generate
 from shard.cli.commands.shard_weights import shard_weights
 from shard.cli.commands.api_key import api_key
+from shard.cli.commands.template import template
 
 
 @click.group()
@@ -38,6 +39,7 @@ cli.add_command(peer)
 utils.add_command(generate)
 utils.add_command(shard_weights)
 utils.add_command(api_key)
+utils.add_command(template)
 
 
 if __name__ == "__main__":

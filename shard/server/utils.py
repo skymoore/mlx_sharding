@@ -15,7 +15,8 @@ from shard.grpc import mlx_tensor_pb2
 logger = logging.getLogger(__name__)
 
 # Configuration
-CHUNK_SIZE_MB = 10
+# Reduced from 10MB to 2MB to avoid gRPC "Message too long" errors
+CHUNK_SIZE_MB = 2
 CHUNK_SIZE_BYTES = CHUNK_SIZE_MB * 1024 * 1024
 
 MODEL_REMAPPING = {

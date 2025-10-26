@@ -202,7 +202,7 @@ def serve(
         ("grpc.max_metadata_size", 64 * 1024 * 1024),  # 64MB metadata
         ("grpc.max_send_message_length", -1),  # Unlimited send
         ("grpc.max_receive_message_length", -1),  # Unlimited receive
-        ("grpc.http2.max_frame_size", 16 * 1024 * 1024),  # 16MB frames
+        ("grpc.http2.max_frame_size", 4 * 1024 * 1024),  # 4MB frames (reduced from 16MB to avoid "Message too long" errors)
     ]
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10), options=server_options

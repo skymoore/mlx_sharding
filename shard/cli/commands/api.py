@@ -40,7 +40,19 @@ import uvicorn
     default=None,
     help="MLX cache limit in GB",
 )
-def api(model, grpc_port, http_port, log_level, cache_limit_gb):
+@click.option(
+    "--chat-template",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to custom Jinja chat template file",
+)
+@click.option(
+    "--chat-template-string",
+    type=str,
+    default=None,
+    help="Custom chat template as inline string",
+)
+def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, chat_template_string):
     """Start the MLX Sharding API server (coordinator-only mode)."""
     from shard.api.fastapi import (
         app,
@@ -70,6 +82,16 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
     else:
         logging.warning("⚠ No API keys configured - authentication disabled!")
 
+    # Load custom chat template if provided
+    custom_template = None
+    if chat_template:
+        with open(chat_template) as f:
+            custom_template = f.read()
+        logging.info(f"✓ Loaded custom chat template from: {chat_template}")
+    elif chat_template_string:
+        custom_template = chat_template_string
+        logging.info("✓ Using inline custom chat template")
+
     # Run orchestrator setup in background
     async def startup():
         try:
@@ -77,6 +99,7 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb):
                 model_path=model,
                 grpc_port=grpc_port,
                 http_port=http_port,
+                custom_chat_template=custom_template,
             )
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")

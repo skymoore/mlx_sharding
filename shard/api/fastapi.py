@@ -42,6 +42,7 @@ from shard.api.tool_calling import (
     ToolCallManager,
     create_tool_call_manager,
 )
+from shard.api.chat_template_manager import ChatTemplateManager
 from shard.orchestrator.orchestrator import APIServerOrchestrator as Orchestrator
 
 # Setup logging
@@ -127,7 +128,7 @@ class GRPCConnectionPool:
             ("grpc.max_metadata_size", 64 * 1024 * 1024),
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
-            ("grpc.http2.max_frame_size", 16 * 1024 * 1024),
+            ("grpc.http2.max_frame_size", 4 * 1024 * 1024),  # 4MB frames (reduced from 16MB to avoid "Message too long" errors)
             ("grpc.http2.min_recv_ping_interval_without_data_ms", 300000),
         ]
         logger.info(f"✓ Connection pool initialized with {len(peer_addresses)} peers")
@@ -224,6 +225,7 @@ class MLXModelProvider:
         start_layer: Optional[int],
         end_layer: Optional[int],
         connection_pool: Optional[GRPCConnectionPool] = None,
+        custom_chat_template: Optional[str] = None,
     ):
         self.model_path = model_path
         self.start_layer = start_layer
@@ -275,6 +277,13 @@ class MLXModelProvider:
         logging.info(f"✓ Model type: {self.model_type}")
         logging.info(
             f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}"
+        )
+        
+        # Initialize chat template manager
+        self.chat_template_manager = ChatTemplateManager(
+            model_type=self.model_type,
+            model_path=tokenizer_path,
+            custom_template=custom_chat_template
         )
 
     def get_default_stop_sequences(self) -> List[str]:
@@ -463,16 +472,24 @@ async def chat_completions(
                     },
                 )
 
+        # Handle system message compatibility
+        if not model_provider.chat_template_manager.supports_system_message():
+            messages = model_provider.chat_template_manager.merge_system_into_user(messages)
+        
         # Apply chat template
         if hasattr(model_provider.tokenizer, "apply_chat_template"):
+            # Use tokenizer's built-in template
             prompt = model_provider.tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
             )
         else:
-            # Fallback: simple concatenation
-            prompt_text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+            # Use our chat template manager
+            prompt_text = model_provider.chat_template_manager.apply_template(
+                messages,
+                add_generation_prompt=True
+            )
             prompt = model_provider.tokenizer.encode(prompt_text)
 
         prompt_array = mx.array(prompt)
@@ -964,7 +981,7 @@ async def stream_completion(request: CompletionRequest, prompt: mx.array):
 
 
 async def run_orchestrator_setup(
-    model_path: str, grpc_port: int, http_port: int
+    model_path: str, grpc_port: int, http_port: int, custom_chat_template: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
     global setup_complete, setup_info, model_provider, orchestrator_instance, discovered_peers
@@ -1032,6 +1049,7 @@ async def run_orchestrator_setup(
             start_layer=None,  # No local layers
             end_layer=None,  # No local layers
             connection_pool=connection_pool,
+            custom_chat_template=custom_chat_template,
         )
 
         setup_complete = True
