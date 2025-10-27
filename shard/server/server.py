@@ -215,11 +215,8 @@ class MLXFlightServer(flight.FlightServerBase):
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
 
-            logger.debug(f"[{session_id}] All chunks sent, signaling done_writing")
-            # CRITICAL: Must call done_writing() to signal end of stream
-            # Without this, the client will wait indefinitely and see "stream ended prematurely"
-            writer.done_writing()
-            logger.debug(f"[{session_id}] Response sent successfully")
+            logger.info(f"[{session_id}] do_exchange completing. Closing response stream.")
+            # Stream closes automatically when do_exchange returns - no explicit done_writing() needed
 
         except Exception as e:
             logger.error(f"[{session_id}] Error in do_exchange: {e}", exc_info=True)
@@ -241,10 +238,8 @@ class MLXFlightServer(flight.FlightServerBase):
                 }
                 error_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=resp_schema)
                 writer.write_with_metadata(error_batch, json.dumps(error_meta).encode())
-                
-                # CRITICAL: Signal end of error stream
-                writer.done_writing()
-                logger.debug(f"[{session_id}] Error response sent to client")
+                logger.debug(f"[{session_id}] Error response sent, do_exchange will complete and close stream")
+                # Stream closes automatically when do_exchange returns
             except Exception as write_error:
                 logger.error(f"[{session_id}] Failed to send error response: {write_error}", exc_info=True)
                 # If we can't send error through stream, raise it

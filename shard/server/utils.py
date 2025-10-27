@@ -268,7 +268,9 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
-        return arrow_to_mlx(arrow_tensor)
+        result = arrow_to_mlx(arrow_tensor)
+        logger.info("Finished reading tensor response from server")
+        return result
 
     except ValueError:
         # Re-raise ValueError as-is (these are our custom error messages)
