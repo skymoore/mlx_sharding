@@ -61,11 +61,9 @@ class MLXFlightServer(flight.FlightServerBase):
             raise flight.FlightInternalError(str(e))
 
     def do_exchange(self, context, descriptor, reader, writer):
-        # Always begin writer first to ensure we can send error responses
-        resp_schema = pa.schema([pa.field("chunk", pa.binary())])
-        writer.begin(resp_schema)
-        writer_begun = True
         session_id = "unknown"
+        resp_schema = pa.schema([pa.field("chunk", pa.binary())])
+        writer_begun = False
         
         try:
             command = descriptor.command.decode()
@@ -170,6 +168,11 @@ class MLXFlightServer(flight.FlightServerBase):
             total_chunks_resp = (total_items + chunk_items - 1) // chunk_items
             
             logger.debug(f"[{session_id}] Response will have {total_chunks_resp} chunks")
+            
+            # Begin writer now that we're ready to send response
+            logger.debug(f"[{session_id}] Beginning writer")
+            writer.begin(resp_schema)
+            writer_begun = True
 
             # Prepare chunks
             flat_np = np_processed.flatten()
@@ -217,8 +220,14 @@ class MLXFlightServer(flight.FlightServerBase):
 
         except Exception as e:
             logger.error(f"[{session_id}] Error in do_exchange: {e}", exc_info=True)
-            # Writer has already begun, so send error response through stream
+            # Send error response through stream
             try:
+                # Begin writer if not already begun
+                if not writer_begun:
+                    logger.debug(f"[{session_id}] Beginning writer for error response")
+                    writer.begin(resp_schema)
+                    writer_begun = True
+                
                 error_meta = {
                     "success": False,
                     "message": str(e),
