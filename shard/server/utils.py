@@ -42,7 +42,29 @@ def _get_classes(config: dict):
     return arch.Model, arch.ModelArgs
 
 
-def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = None):
+def load_model(
+    path_or_hf_repo: str, 
+    start_layer: int = None, 
+    end_layer: int = None,
+    lazy: bool = False,
+    strict: bool = True,
+):
+    """
+    Load model with optional layer slicing for distributed inference.
+    
+    This function extends mlx_lm's load_model with layer slicing capabilities
+    for distributed inference across multiple peers.
+    
+    Args:
+        path_or_hf_repo: Local path or HuggingFace repo ID
+        start_layer: Starting layer index (inclusive) for this shard
+        end_layer: Ending layer index (exclusive) for this shard
+        lazy: If False, eval model parameters immediately
+        strict: Whether to raise exception if weights don't match
+        
+    Returns:
+        Tuple of (model, config) - model with loaded weights and configuration
+    """
     from pathlib import Path
 
     # Check if it's a local path or HuggingFace repo
@@ -50,40 +72,65 @@ def load_model(path_or_hf_repo: str, start_layer: int = None, end_layer: int = N
         path = Path(path_or_hf_repo)
     else:
         path = hf_repo_to_path(path_or_hf_repo)
+    
+    # Load config
     with open(path / "config.json", "r") as f:
         config = json.load(f)
-        if start_layer is not None and end_layer is not None:
-            config["start_layer"] = start_layer
-            config["end_layer"] = end_layer
-    weight_files = glob.glob(str(path / "*.safetensors"))
+        
+    # Add layer slicing to config (our unique feature for distributed inference!)
+    if start_layer is not None and end_layer is not None:
+        config["start_layer"] = start_layer
+        config["end_layer"] = end_layer
+        logger.info(f"Loading model shard: layers {start_layer}-{end_layer-1} (inclusive)")
+    
+    # Load weights
+    weight_files = glob.glob(str(path / "model*.safetensors"))
     if not weight_files:
-        raise FileNotFoundError(f"No safetensors found in {path}")
+        if strict:
+            raise FileNotFoundError(f"No safetensors found in {path}")
+        weight_files = []
+    
     weights = {}
     for wf in weight_files:
         weights.update(mx.load(wf))
+    
+    # Get model classes
     model_class, model_args_class = _get_classes(config=config)
-
     model_args = model_args_class.from_dict(config)
     model = model_class(model_args)
 
+    # Sanitize weights if needed
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
 
+    # Handle quantization
     if (quantization := config.get("quantization", None)) is not None:
-
         def class_predicate(p, m):
+            # Handle custom per layer quantizations
+            if p in config.get("quantization", {}):
+                return config["quantization"][p]
             if not hasattr(m, "to_quantized"):
                 return False
             return f"{p}.scales" in weights
 
         nn.quantize(
             model,
-            **quantization,
+            group_size=quantization["group_size"],
+            bits=quantization["bits"],
+            mode=quantization.get("mode", "affine"),
             class_predicate=class_predicate,
         )
-    model.load_weights(list(weights.items()))
+    
+    # Load weights into model
+    model.load_weights(list(weights.items()), strict=strict)
+    
+    # Evaluate parameters if not lazy
+    if not lazy:
+        mx.eval(model.parameters())
+    
     model.eval()
-    return model
+    
+    return model, config
 
 
 def send_tensor(stub, tensor: mx.array, session_id: str = None):

@@ -42,7 +42,7 @@ from shard.api.tool_calling import (
     ToolCallManager,
     create_tool_call_manager,
 )
-from shard.api.chat_template_manager import ChatTemplateManager
+
 from shard.orchestrator.orchestrator import APIServerOrchestrator as Orchestrator
 
 # Setup logging
@@ -259,11 +259,11 @@ class MLXModelProvider:
         else:
             # Peer mode: load local layers (not used in coordinator-only mode)
             logging.info(f"Peer mode: loading layers {start_layer}-{end_layer}")
-            self.model = load_model(
+            self.model, model_config = load_model(
                 model_path, start_layer=start_layer, end_layer=end_layer
             )
             # For peer mode, would need stubs - not implemented in this coordinator-only setup
-            self.model_type = getattr(self.model, "model_type", "unknown")
+            self.model_type = model_config.get("model_type", "unknown")
 
         # Model info
         self.model_name = (
@@ -279,12 +279,8 @@ class MLXModelProvider:
             f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}"
         )
         
-        # Initialize chat template manager
-        self.chat_template_manager = ChatTemplateManager(
-            model_type=self.model_type,
-            model_path=tokenizer_path,
-            custom_template=custom_chat_template
-        )
+        # Chat templates are handled by the tokenizer's built-in apply_chat_template()
+        logging.info(f"✓ Chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
 
     def get_default_stop_sequences(self) -> List[str]:
         """Get model-specific default stop sequences."""
@@ -472,25 +468,13 @@ async def chat_completions(
                     },
                 )
 
-        # Handle system message compatibility
-        if not model_provider.chat_template_manager.supports_system_message():
-            messages = model_provider.chat_template_manager.merge_system_into_user(messages)
-        
-        # Apply chat template
-        if hasattr(model_provider.tokenizer, "apply_chat_template"):
-            # Use tokenizer's built-in template
-            prompt = model_provider.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-        else:
-            # Use our chat template manager
-            prompt_text = model_provider.chat_template_manager.apply_template(
-                messages,
-                add_generation_prompt=True
-            )
-            prompt = model_provider.tokenizer.encode(prompt_text)
+        # Apply chat template using tokenizer's built-in support
+        # The tokenizer handles system message compatibility automatically
+        prompt = model_provider.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
 
         prompt_array = mx.array(prompt)
 

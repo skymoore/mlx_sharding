@@ -23,6 +23,7 @@ from shard.zeroconf.discovery import PeerDiscovery
 from shard.zeroconf.capabilities import SystemCapabilities
 from shard.server.server import serve as grpc_serve
 from shard.server.utils import load_model
+from mlx_lm.tokenizer_utils import load_tokenizer
 
 # Setup logging
 logging.basicConfig(
@@ -77,6 +78,8 @@ class PeerServer:
         self.capabilities = SystemCapabilities.get_capabilities(max_ram_gb=max_ram_gb)
         self.state = "idle"  # idle, receiving_files, loading_model, ready, error
         self.model = None
+        self.tokenizer = None  # Store tokenizer for chat template support
+        self.model_config = None  # Store model config
         self.assignment: Optional[ShardAssignment] = None
         self.coordinator_id: Optional[str] = None
         self.file_buffers: Dict[str, Dict] = {}  # For chunked file reception
@@ -359,9 +362,18 @@ class PeerServer:
                 if not model_path.exists():
                     raise FileNotFoundError(f"Model not found at: {model_path}")
 
-                self.model = load_model(
+                # Load model and config
+                self.model, self.model_config = load_model(
                     str(model_path), start_layer=start_layer, end_layer=end_layer
                 )
+                
+                # Load tokenizer for chat template support and debugging
+                logger.info(f"Loading tokenizer from {model_path}")
+                self.tokenizer = load_tokenizer(
+                    model_path,
+                    eos_token_ids=self.model_config.get("eos_token_id", None)
+                )
+                logger.info(f"✓ Tokenizer loaded with chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
 
                 # Start gRPC server now that model is loaded
                 if self.grpc_thread is None:
@@ -393,6 +405,8 @@ class PeerServer:
         async def unload_model():
             """Unload current model."""
             self.model = None
+            self.tokenizer = None
+            self.model_config = None
             self.assignment = None
             self.coordinator_id = None
             self.state = "idle"
