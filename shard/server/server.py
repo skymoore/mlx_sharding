@@ -1,12 +1,13 @@
-import grpc
-from concurrent import futures
-from shard.grpc import mlx_tensor_pb2, mlx_tensor_pb2_grpc
-from shard.server.utils import bytes_to_tensor, load_model, tensor_to_bytes
-import mlx.core as mx
-import threading
-import time
+import pyarrow as pa
+from pyarrow import flight
+import hashlib
+import json
 import logging
+import mlx.core as mx
 from mlx.utils import tree_reduce
+from shard.server.utils import load_model, mlx_to_arrow, arrow_to_mlx
+import numpy as np
+from concurrent import futures
 
 # Setup logging
 logging.basicConfig(
@@ -18,34 +19,12 @@ MODEL = None
 CACHES = {}  # session_id -> list[KVCache]
 CACHE_REQUEST_COUNTS = {}  # session_id -> int (track requests per session)
 
-# Prefill configuration for chunking large prompts
-PREFILL_STEP_SIZE = 2048
+# Chunk size for large tensors
+CHUNK_SIZE_BYTES = 2 * 1024 * 1024  # 2MB chunks
 
-# Global chunk buffer
-CHUNK_BUFFERS = (
-    {}
-)  # Key: tensor_id, Value: {'chunks': {}, 'timestamp': float, 'total': int, 'shape': tuple, 'dtype': str}
-CHUNK_BUFFER_LOCK = threading.Lock()
-CHUNK_TIMEOUT_SECONDS = 60
-
-
-def cleanup_stale_chunks():
-    """Background task to clean up incomplete chunk transfers."""
-    while True:
-        time.sleep(30)  # Run every 30 seconds
-        current_time = time.time()
-
-        with CHUNK_BUFFER_LOCK:
-            stale_ids = [
-                tid
-                for tid, data in CHUNK_BUFFERS.items()
-                if current_time - data["timestamp"] > CHUNK_TIMEOUT_SECONDS
-            ]
-
-            for tid in stale_ids:
-                logger.info(f"Cleaning up stale chunks for tensor_id: {tid}")
-                del CHUNK_BUFFERS[tid]
-
+class MLXFlightAuth(flight.ServerAuthHandler):
+    def is_valid(self, token):
+        return b""  # No authentication for simplicity
 
 def reset_cache(session_id):
     if not session_id:
@@ -59,145 +38,140 @@ def reset_cache(session_id):
         )
     logger.info(f"Cache reset for session {session_id}")
 
+class MLXFlightServer(flight.FlightServerBase):
+    def __init__(self, location, *args, **kwargs):
+        super().__init__(location, auth_handler=MLXFlightAuth(), *args, **kwargs)
+        self.caches = CACHES
+        self.cache_request_counts = CACHE_REQUEST_COUNTS
+        self.model = MODEL
 
-class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
-    def SendTensor(self, request, context):
+    def do_action(self, context, action):
         try:
-            import time
+            if action.type == "ResetCache":
+                body = json.loads(action.body.to_py())
+                session_id = body.get("session_id")
+                reset_cache(session_id)
+                return [flight.Result(b"Cache reset successfully")]
+            raise flight.FlightUnavailableError(f"Unknown action: {action.type}")
+        except Exception as e:
+            logger.error(f"Error in do_action: {e}", exc_info=True)
+            raise flight.FlightInternalError(str(e))
 
-            start_time = time.time()
+    def do_exchange(self, context, descriptor, reader, writer):
+        try:
+            command = descriptor.command.decode()
+            if command != "SendTensor":
+                raise flight.FlightInvalidArgument("Unknown command")
 
-            # Extract session_id from request
-            session_id = request.session_id if request.session_id else None
+            # Read metadata from first chunk
+            batch, meta = reader.read_chunk()
+            if meta is None:
+                raise flight.FlightInvalidArgument("No metadata provided")
 
-            # Check which type of tensor we received
-            if request.HasField("full_tensor"):
-                # Original non-chunked path (backward compatible)
-                tensor_msg = request.full_tensor
-                tensor = bytes_to_tensor(tensor_msg.tensor_data, tensor_msg.dtype)
-                tensor = mx.reshape(tensor, tensor_msg.shape)
+            meta_dict = json.loads(meta.to_py())
+            session_id = meta_dict.get("session_id", "default")
+            total_chunks = meta_dict["total_chunks"]
+            shape = tuple(meta_dict["shape"])
+            dtype_str = meta_dict["dtype"]
 
-            elif request.HasField("chunked_tensor"):
-                # NEW: Chunked tensor path
-                chunk = request.chunked_tensor
-                tensor_id = chunk.tensor_id
-                chunk_idx = chunk.chunk_index
-                total_chunks = chunk.total_chunks
+            # Map to NumPy dtype
+            dtype_map = {
+                "mlx.core.float32": np.float32,
+                "mlx.core.int32": np.int32,
+                "mlx.core.int64": np.int64,
+                "mlx.core.float16": np.float16,
+                "mlx.core.bfloat16": np.uint16,
+            }
+            np_dtype = dtype_map.get(dtype_str, np.float32)
 
-                with CHUNK_BUFFER_LOCK:
-                    # Initialize buffer for this tensor if first chunk
-                    if tensor_id not in CHUNK_BUFFERS:
-                        CHUNK_BUFFERS[tensor_id] = {
-                            "chunks": {},
-                            "timestamp": time.time(),
-                            "total": total_chunks,
-                            "shape": tuple(chunk.shape),
-                            "dtype": chunk.dtype,
-                        }
+            # Collect chunks
+            chunks = {}
+            if batch and batch.num_rows > 0:
+                chunks[0] = batch[0][0].as_py()  # First chunk data if present
 
-                    # Store this chunk
-                    CHUNK_BUFFERS[tensor_id]["chunks"][chunk_idx] = chunk.chunk_data
-                    CHUNK_BUFFERS[tensor_id][
-                        "timestamp"
-                    ] = time.time()  # Update timestamp
+            for i in range(1, total_chunks):
+                batch, chunk_meta = reader.read_chunk()
+                if chunk_meta is None:
+                    raise flight.FlightInvalidArgument("Missing chunk metadata")
+                chunk_dict = json.loads(chunk_meta.to_py())
+                chunk_idx = chunk_dict["chunk_index"]
+                chunks[chunk_idx] = batch[0][0].as_py()
 
-                    # Check if we have all chunks
-                    if len(CHUNK_BUFFERS[tensor_id]["chunks"]) == total_chunks:
-                        # Reassemble in order
-                        full_data = b"".join(
-                            [
-                                CHUNK_BUFFERS[tensor_id]["chunks"][i]
-                                for i in range(total_chunks)
-                            ]
-                        )
+            # Reassemble bytes
+            full_bytes = b''.join(chunks.get(i, b'') for i in range(total_chunks))
+            received_md5 = hashlib.md5(full_bytes).hexdigest()
+            if received_md5 != meta_dict["md5"]:
+                logger.error(f"Checksum mismatch for session {session_id}")
+                raise flight.FlightInternalError("Checksum mismatch")
+            if len(full_bytes) == 0:
+                raise flight.FlightInvalidArgument("No data received")
 
-                        # Clean up buffer
-                        shape = CHUNK_BUFFERS[tensor_id]["shape"]
-                        dtype = CHUNK_BUFFERS[tensor_id]["dtype"]
-                        del CHUNK_BUFFERS[tensor_id]
+            # Convert to NumPy and reshape
+            np_array = np.frombuffer(full_bytes, dtype=np_dtype)
+            np_array = np_array.reshape(shape)
 
-                        # Convert to tensor
-                        tensor = bytes_to_tensor(full_data, dtype)
-                        tensor = mx.reshape(tensor, shape)
-                    else:
-                        # Not all chunks received yet, return success but no tensor
-                        return mlx_tensor_pb2.TensorResponse(
-                            success=True,
-                            message=f"Chunk {chunk_idx+1}/{total_chunks} received",
-                            tensor=None,
-                        )
-            else:
-                return mlx_tensor_pb2.TensorResponse(
-                    success=False,
-                    message="Invalid request: no tensor payload",
-                    tensor=None,
-                )
+            # Convert to MLX
+            arrow_tensor = pa.Tensor.from_numpy(np_array)
+            tensor = arrow_to_mlx(arrow_tensor)
 
-            # Process the tensor (same for both paths)
-            if MODEL is not None:
-                # Pipeline parallelism: Each peer maintains its OWN cache in memory
-                # The cache persists across tokens within a generation
-                # ResetCache RPC clears it between generations
-                # NO cache synchronization needed - each peer's cache is independent
-                if session_id is None:
-                    session_id = "default"
-                if session_id not in CACHES:
-                    reset_cache(session_id)
-                cache_to_use = CACHES[session_id]
+            # Process tensor
+            if self.model is None:
+                raise flight.FlightInternalError("Model not loaded")
 
-                # 🔥 NEW: Prefill chunking for large inputs (like initial prompt)
-                # This prevents OOM on long prompts by processing in chunks
-                processed_tensor = MODEL(tensor, cache=cache_to_use)
+            if session_id not in self.caches:
+                reset_cache(session_id)
+            cache_to_use = self.caches[session_id]
 
-                # 🔥 NEW: Track request count for periodic cache clearing
-                if session_id not in CACHE_REQUEST_COUNTS:
-                    CACHE_REQUEST_COUNTS[session_id] = 0
-                CACHE_REQUEST_COUNTS[session_id] += 1
-                
-                # Clear cache every 256 requests to prevent memory accumulation
-                if CACHE_REQUEST_COUNTS[session_id] % 256 == 0:
-                    mx.clear_cache()
-                    logger.debug(f"Cleared cache after {CACHE_REQUEST_COUNTS[session_id]} requests for session {session_id}")
+            processed_tensor = self.model(tensor, cache=cache_to_use)
 
-                # NEVER reduce to last token on the peer side
-                # The coordinator will extract the last position for sampling
-                # Peers must always return full sequence to build KV cache correctly
+            # Update request count and clear cache if needed
+            if session_id not in self.cache_request_counts:
+                self.cache_request_counts[session_id] = 0
+            self.cache_request_counts[session_id] += 1
+            if self.cache_request_counts[session_id] % 256 == 0:
+                mx.clear_cache()
+                logger.debug(f"Cleared cache after {self.cache_request_counts[session_id]} requests for session {session_id}")
 
-                processed_bytes = tensor_to_bytes(processed_tensor)
+            # Prepare response: chunk if large
+            arrow_processed = mlx_to_arrow(processed_tensor)
+            np_processed = arrow_processed.to_numpy()
+            total_size = np_processed.nbytes
+            item_size = np_processed.itemsize
+            chunk_items = CHUNK_SIZE_BYTES // item_size
+            total_items = np_processed.size
+            total_chunks_resp = (total_items + chunk_items - 1) // chunk_items
 
-                response_tensor = mlx_tensor_pb2.Tensor(
-                    tensor_data=processed_bytes,
-                    shape=list(processed_tensor.shape),
-                    dtype=str(processed_tensor.dtype),
-                )
-                return mlx_tensor_pb2.TensorResponse(
-                    success=True,
-                    message="Tensor processed successfully",
-                    tensor=response_tensor,
-                )
-            else:
-                return mlx_tensor_pb2.TensorResponse(
-                    success=False, message="Model not loaded", tensor=None
-                )
+            # Response schema
+            resp_schema = pa.schema([pa.field("chunk", pa.binary())])
+            writer.begin(resp_schema)
+
+            # Send metadata
+            resp_meta = {
+                "success": True,
+                "message": "Tensor processed successfully",
+                "shape": list(processed_tensor.shape),
+                "dtype": str(processed_tensor.dtype),
+                "total_chunks": total_chunks_resp,
+            }
+            meta_batch = pa.RecordBatch.from_arrays([pa.array([])], schema=resp_schema)
+            writer.write_batch(meta_batch, app_metadata=json.dumps(resp_meta).encode())
+
+            # Send chunks
+            flat_np = np_processed.flatten()
+            for i in range(total_chunks_resp):
+                start = i * chunk_items
+                end = min(start + chunk_items, total_items)
+                chunk_np = flat_np[start:end]
+                chunk_bytes = chunk_np.tobytes()
+                chunk_array = pa.array([chunk_bytes])
+                batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
+                writer.write_batch(batch, app_metadata=json.dumps({"chunk_index": i}).encode())
+
+            writer.done_writing()
 
         except Exception as e:
-            logger.error(f"Error processing tensor: {e}", exc_info=True)
-            return mlx_tensor_pb2.TensorResponse(
-                success=False, message=str(e), tensor=None
-            )
-
-    def ResetCache(self, request, context):
-        try:
-            reset_cache(request.session_id)
-            return mlx_tensor_pb2.ResetCacheResponse(
-                success=True, message="Cache reset successfully"
-            )
-        except Exception as e:
-            logger.error(f"Error resetting cache: {e}", exc_info=True)
-            return mlx_tensor_pb2.ResetCacheResponse(
-                success=False, message=f"Error resetting cache: {str(e)}"
-            )
-
+            logger.error(f"Error in do_exchange: {e}", exc_info=True)
+            raise flight.FlightInternalError(str(e))
 
 def serve(
     model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None
@@ -213,8 +187,7 @@ def serve(
     # Model loaded successfully
     logger.info(f"✓ Model loaded: {type(MODEL).__name__}")
 
-    # 🔥 NEW: Set wired limit for optimal Metal memory management
-    # This is critical for preventing memory pressure and performance issues
+    # Set wired limit for optimal Metal memory management
     if mx.metal.is_available():
         try:
             model_bytes = tree_reduce(
@@ -242,32 +215,12 @@ def serve(
     else:
         logger.info("Metal not available, skipping wired limit setup")
 
-    # No initial reset needed - caches created per session
-
-    # Start cleanup thread
-    cleanup_thread = threading.Thread(target=cleanup_stale_chunks, daemon=True)
-    cleanup_thread.start()
-    logger.info("Started chunk cleanup thread")
-
-    server_options = [
-        ("grpc.max_metadata_size", 64 * 1024 * 1024),  # 64MB metadata
-        ("grpc.max_send_message_length", -1),  # Unlimited send
-        ("grpc.max_receive_message_length", -1),  # Unlimited receive
-        ("grpc.http2.max_frame_size", 4 * 1024 * 1024),  # 4MB frames (reduced from 16MB to avoid "Message too long" errors)
-    ]
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=10), options=server_options
-    )
-    mlx_tensor_pb2_grpc.add_MLXTensorServiceServicer_to_server(
-        MLXTensorServicer(), server
-    )
-
-    server.add_insecure_port(f"[::]:{port}")
-    server.start()
-    logger.info(f"Server started, listening on 0.0.0.0:{port}")
+    # Start Flight server
+    location = f"grpc://0.0.0.0:{port}"
+    server = MLXFlightServer(location)
+    logger.info(f"Flight server started, listening on {location}")
     if start_layer is not None or end_layer is not None:
-        # end_layer is exclusive, so actual last layer is end_layer-1
         actual_start = start_layer or 0
         actual_end = (end_layer - 1) if end_layer else "end"
         logger.info(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
-    server.wait_for_termination()
+    server.serve()  # Blocks until shutdown

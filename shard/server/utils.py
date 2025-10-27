@@ -9,7 +9,10 @@ from mlx_lm.sample_utils import apply_top_p, make_logits_processors
 from mlx_lm.utils import hf_repo_to_path
 import numpy as np
 import uuid
-from shard.grpc import mlx_tensor_pb2
+import pyarrow as pa
+import hashlib
+import time
+from pyarrow import flight
 
 # Setup logger for this module
 logger = logging.getLogger(__name__)
@@ -133,90 +136,110 @@ def load_model(
     return model, config
 
 
-def send_tensor(stub, tensor: mx.array, session_id: str = None):
-    """Send tensor, automatically chunking if needed."""
-    import sys
-    
-    tensor_bytes = tensor_to_bytes(tensor)
-    message_size_mb = len(tensor_bytes) / (1024 * 1024)
+def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str = None):
+    """Send tensor using Arrow Flight, automatically chunking if needed."""
+    arrow_tensor = mlx_to_arrow(tensor)
+    np_tensor = arrow_tensor.to_numpy()
+    total_size = np_tensor.nbytes
+    item_size = np_tensor.itemsize
+    chunk_items = CHUNK_SIZE_BYTES // item_size
+    total_items = np_tensor.size
+    total_chunks = (total_items + chunk_items - 1) // chunk_items
 
-    # Small tensor - send directly (backward compatible)
-    if len(tensor_bytes) < CHUNK_SIZE_BYTES:
-        tensor_message = mlx_tensor_pb2.Tensor(
-            tensor_data=tensor_bytes, shape=list(tensor.shape), dtype=str(tensor.dtype)
-        )
-        request = mlx_tensor_pb2.SendTensorRequest(
-            full_tensor=tensor_message, session_id=session_id or ""
-        )
+    descriptor = flight.FlightDescriptor.for_command("SendTensor")
+    writer, reader = client.do_exchange(descriptor)
 
-        try:
-            response = stub.SendTensor(request)
-            return response
-        except Exception as e:
-            logger.error(f"Failed to send {message_size_mb:.2f}MB tensor: {e}")
-            raise
+    # Send metadata in first write (no data)
+    meta = {
+        "session_id": session_id or "default",
+        "total_chunks": total_chunks,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "md5": hashlib.md5(tensor_to_bytes(tensor)).hexdigest()
+    }
+    schema = pa.schema([pa.field("chunk", pa.binary())])
+    writer.begin(schema)
+    writer.write_metadata(json.dumps(meta).encode())
 
-    # Large tensor - chunk it
-    else:
-        tensor_id = str(uuid.uuid4())
-        total_chunks = (len(tensor_bytes) + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
+    # Send chunks
+    flat_np = np_tensor.flatten()
+    for i in range(total_chunks):
+        start = i * chunk_items
+        end = min(start + chunk_items, total_items)
+        chunk_np = flat_np[start:end]
+        chunk_bytes = chunk_np.tobytes()
+        chunk_array = pa.array([chunk_bytes])
+        batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
+        writer.write_batch(batch, app_metadata=json.dumps({"chunk_index": i}).encode())
 
-        for chunk_idx in range(total_chunks):
-            start = chunk_idx * CHUNK_SIZE_BYTES
-            end = min(start + CHUNK_SIZE_BYTES, len(tensor_bytes))
-            chunk_data = tensor_bytes[start:end]
-
-            chunk_message = mlx_tensor_pb2.TensorChunk(
-                tensor_id=tensor_id,
-                chunk_index=chunk_idx,
-                total_chunks=total_chunks,
-                chunk_data=chunk_data,
-                shape=list(tensor.shape),
-                dtype=str(tensor.dtype),
-            )
-            request = mlx_tensor_pb2.SendTensorRequest(
-                chunked_tensor=chunk_message, session_id=session_id or ""
-            )
-
-            try:
-                response = stub.SendTensor(request)
-
-                # Only the last chunk returns the processed tensor
-                if chunk_idx == total_chunks - 1:
-                    return response
-
-            except Exception as e:
-                logger.error(f"Failed to send chunk {chunk_idx+1}/{total_chunks}: {e}")
-                raise
+    writer.done_writing()
+    return reader  # Return reader to read response
 
 
-def response_to_mlx_array(response):
-    """Convert a TensorResponse protobuf message to an MLX array."""
+def response_to_mlx_array(reader: flight.FlightStreamReader):
+    """Convert Flight response to MLX array."""
     try:
-        # Check if response is valid
-        if not hasattr(response, "success"):
-            logger.error(f"Invalid response object: {type(response)}")
-            return None
+        # Read metadata batch
+        batch, meta = reader.read_chunk()
+        if meta is None:
+            raise ValueError("No metadata in response")
+        meta_dict = json.loads(meta.to_py())
 
-        if not response.success:
-            logger.error(f"Error from shard: {response.message}")
-            return None
+        if not meta_dict.get("success"):
+            raise ValueError(f"Error from shard: {meta_dict.get('message')}")
 
-        if response.tensor is None:
-            logger.error(f"No tensor in response: {response.message}")
-            return None
+        total_chunks = meta_dict["total_chunks"]
+        shape = tuple(meta_dict["shape"])
+        dtype_str = meta_dict["dtype"]
 
-        # Debug: log tensor info at DEBUG level
-        logger.debug(
-            f"Converting tensor: dtype={response.tensor.dtype}, shape={response.tensor.shape}, data_len={len(response.tensor.tensor_data)}"
-        )
+        dtype_map = {
+            "mlx.core.float32": np.float32,
+            "mlx.core.int32": np.int32,
+            "mlx.core.int64": np.int64,
+            "mlx.core.float16": np.float16,
+            "mlx.core.bfloat16": np.uint16,
+        }
+        np_dtype = dtype_map.get(dtype_str, np.float32)
 
-        tensor = bytes_to_tensor(response.tensor.tensor_data, response.tensor.dtype)
-        tensor = tensor.reshape(response.tensor.shape)
-        return tensor
+        # Collect chunks
+        chunks = {}
+        for i in range(total_chunks):
+            batch, chunk_meta = reader.read_chunk()
+            if chunk_meta is None:
+                raise ValueError("Missing chunk metadata")
+            chunk_dict = json.loads(chunk_meta.to_py())
+            chunk_idx = chunk_dict["chunk_index"]
+            chunks[chunk_idx] = batch[0][0].as_py()
+
+        # Reassemble
+        full_bytes = b''.join(chunks.get(i, b'') for i in range(total_chunks))
+        np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
+        arrow_tensor = pa.Tensor.from_numpy(np_array)
+        return arrow_to_mlx(arrow_tensor)
+
     except Exception as e:
         logger.error(f"Error converting response to MLX array: {e}", exc_info=True)
-        return None
+        raise e
+
+
+def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, backoff=1):
+    for attempt in range(max_retries):
+        try:
+            reader = send_tensor(client, tensor, session_id)
+            return response_to_mlx_array(reader)
+        except flight.FlightInternalError as e:
+            if "Checksum mismatch" in str(e):
+                if attempt < max_retries - 1:
+                    logger.warning(f"Checksum mismatch, retrying ({attempt+1}/{max_retries})")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    raise
+            else:
+                raise
+        except Exception as e:
+            raise
+    raise ValueError("Max retries exceeded")
 
 
 def tensor_to_bytes(tensor):
@@ -255,7 +278,7 @@ def bytes_to_tensor(byte_data, dtype_str):
         return mx.array(np_array, dtype=mx_dtype)
 
 
-def create_generate_step_with_grpc(grpc_stubs: List):
+def create_generate_step_with_flight(flight_clients: List[flight.FlightClient]):
     def generate_step(
         prompt: mx.array,
         model: nn.Module,
@@ -266,18 +289,15 @@ def create_generate_step_with_grpc(grpc_stubs: List):
         logit_bias: Optional[Dict[int, float]] = None,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
 
-        for stub in grpc_stubs:
-            reset_response = stub.ResetCache(mlx_tensor_pb2.ResetCacheRequest())
-            logger.debug(f"ResetCache Response: {reset_response.message}")
+        for client in flight_clients:
+            client.do_action(flight.Action("ResetCache", json.dumps({"session_id": ""}).encode()))
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            # logit_bias is now handled by logits_processors
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if temp == 0:
                 token = mx.argmax(logits, axis=-1)
             else:
                 if top_p > 0 and top_p < 1.0:
-                    # apply_top_p modifies logprobs, then sample from them
                     modified_logprobs = apply_top_p(logprobs, top_p)
                     token = mx.random.categorical(modified_logprobs * (1 / temp))
                 else:
@@ -296,7 +316,6 @@ def create_generate_step_with_grpc(grpc_stubs: List):
         if repetition_context_size:
             repetition_context = repetition_context[-repetition_context_size:]
 
-        # Create logits processors (including repetition penalty if specified)
         logits_processors = make_logits_processors(
             logit_bias=logit_bias,
             repetition_penalty=repetition_penalty,
@@ -305,24 +324,18 @@ def create_generate_step_with_grpc(grpc_stubs: List):
 
         def _step(y):
             nonlocal repetition_context
-            # Ensure y has shape (batch, seq_len)
-            if y.ndim == 0:  # scalar
+            if y.ndim == 0:
                 y = y.reshape(1, 1)
-            elif y.ndim == 1:  # (seq_len,)
+            elif y.ndim == 1:
                 y = y.reshape(1, -1)
-            # else y is already (batch, seq_len)
 
             output = model(y, cache=cache) 
 
-            for stub in grpc_stubs:
-                response = send_tensor(stub, output)
-                output = response_to_mlx_array(response)
-                if output is None:
-                    raise ValueError("Shard returned None")
+            for client in flight_clients:
+                output = send_and_receive_tensor(client, output)
 
             logits = output[:, -1, :]
 
-            # Apply logits processors (repetition penalty, logit bias, etc.)
             for processor in logits_processors:
                 logits = processor(mx.array(repetition_context), logits)
 
@@ -347,91 +360,44 @@ def create_generate_step_with_grpc(grpc_stubs: List):
 
 class PipelineModel(nn.Module):
     """
-    Wrapper that makes a distributed gRPC pipeline look like a local model.
-    This allows us to use mlx_lm's generate_step directly without reimplementing it.
+    Wrapper that makes a distributed Flight pipeline look like a local model.
     """
-    def __init__(self, grpc_stubs: List, session_id: str):
+    def __init__(self, flight_clients: List[flight.FlightClient], session_id: str):
         super().__init__()
-        self.grpc_stubs = grpc_stubs
+        self.flight_clients = flight_clients
         self.session_id = session_id
-        # Peers manage their own caches, so we return an empty cache list
-        # This prevents mlx_lm from trying to create caches based on self.layers
         self.layers = []
-    
+
     def make_cache(self):
-        """
-        Return empty cache list since peers manage their own caches.
-        This prevents mlx_lm's _make_cache from creating BatchKVCache objects.
-        """
         return []
         
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
-        """
-        Forward pass through the distributed pipeline.
-        
-        Args:
-            inputs: Token IDs with shape (batch, seq_len)
-            cache: Ignored - peers manage their own caches
-            
-        Returns:
-            Logits with shape (batch, seq_len, vocab_size)
-        """
-        # Ensure inputs are int32 token IDs with shape (batch, seq_len)
         if inputs.dtype != mx.int32:
             inputs = inputs.astype(mx.int32)
         if inputs.ndim == 1:
             inputs = inputs.reshape(1, -1)
         
-        # Send through pipeline
         step = 2048
         if inputs.dtype == mx.int32 and inputs.shape[1] > step:
             processed = None
             while inputs.shape[1] > 0:
                 chunk_size = min(step, inputs.shape[1])
                 tensor = inputs[:, :chunk_size]
-                for i, stub in enumerate(self.grpc_stubs):
-                    response = send_tensor(stub, tensor, session_id=self.session_id)
-                    tensor = response_to_mlx_array(response)
-                    if tensor is None:
-                        raise ValueError(f"Peer {i} returned None")
-                processed = tensor  # Keep last chunk's output (logits for last positions)
+                for i, client in enumerate(self.flight_clients):
+                    tensor = send_and_receive_tensor(client, tensor, self.session_id)
+                processed = tensor
                 inputs = inputs[:, chunk_size:]
-                mx.clear_cache()  # Optional: clear after each chunk to manage memory
+                mx.clear_cache()
             return processed
         else:
             tensor = inputs
-            for i, stub in enumerate(self.grpc_stubs):
-                response = send_tensor(stub, tensor, session_id=self.session_id)
-                tensor = response_to_mlx_array(response)
-                if tensor is None:
-                    raise ValueError(f"Peer {i} returned None")
+            for i, client in enumerate(self.flight_clients):
+                tensor = send_and_receive_tensor(client, tensor, self.session_id)
         
-        # tensor is now logits from last peer with shape (batch, seq_len, vocab_size)
         return tensor
 
 
-def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
-    """
-    Create generation function for coordinator-only mode (no local model).
-    
-    This wraps the distributed gRPC pipeline in a PipelineModel and uses
-    mlx_lm's stream_generate, ensuring identical behavior to local inference
-    INCLUDING proper EOS token detection.
-
-    Pipeline flow:
-    1. Coordinator sends token IDs (int32) to first peer
-    2. First peer embeds tokens and processes through its layers
-    3. Each subsequent peer processes hidden states through its layers
-    4. Last peer returns logits to coordinator
-    5. mlx_lm's stream_generate handles sampling, EOS detection, and generation loop
-
-    Args:
-        grpc_stubs: Ordered list of gRPC stubs (by layer range)
-        tokenizer: The tokenizer (needed for EOS token detection)
-
-    Returns:
-        Generator function that yields (token, logprobs) tuples
-    """
+def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], tokenizer):
     from mlx_lm.generate import stream_generate
     
     def generate_step(
@@ -444,7 +410,6 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         max_tokens: int = 256,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
         
-        # 🔍 DEBUG: Log generation parameters
         logger.info("=" * 80)
         logger.info("🚀 DISTRIBUTED GENERATION START")
         logger.info("=" * 80)
@@ -455,7 +420,6 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         logger.info(f"Top-p: {top_p}")
         logger.info(f"Repetition penalty: {repetition_penalty}")
         
-        # 🔍 DEBUG: Log tokenizer EOS configuration
         if hasattr(tokenizer, 'eos_token_ids'):
             logger.info(f"Tokenizer EOS token IDs: {tokenizer.eos_token_ids}")
             for eos_id in tokenizer.eos_token_ids:
@@ -466,39 +430,29 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
                     pass
         logger.info("=" * 80)
         
-        # Generate unique session ID for this generation
         session_id = str(uuid.uuid4())
         logger.info(f"Session ID: {session_id}")
         
-        # Reset all peer caches at start of generation
-        for i, stub in enumerate(grpc_stubs):
-            reset_response = stub.ResetCache(
-                mlx_tensor_pb2.ResetCacheRequest(session_id=session_id)
-            )
-            logger.debug(f"Peer {i} ResetCache Response: {reset_response.message}")
+        for i, client in enumerate(flight_clients):
+            client.do_action(flight.Action("ResetCache", json.dumps({"session_id": session_id}).encode()))
+            logger.debug(f"Peer {i} cache reset")
         
-        # Create pipeline model wrapper
-        pipeline_model = PipelineModel(grpc_stubs, session_id)
+        pipeline_model = PipelineModel(flight_clients, session_id)
         
-        # Create logits processors
         logits_processors = make_logits_processors(
             logit_bias=logit_bias,
             repetition_penalty=repetition_penalty,
             repetition_context_size=repetition_context_size,
         )
         
-        # Create sampler
         if temp == 0:
             sampler = lambda x: mx.argmax(x, axis=-1)
         else:
             from mlx_lm.sample_utils import make_sampler
             sampler = make_sampler(temp=temp, top_p=top_p)
         
-        # 🔍 DEBUG: Track generation
         token_count = 0
         
-        # Use mlx_lm's stream_generate!
-        # This includes EOS token detection, which generate_step does NOT have
         for response in stream_generate(
             model=pipeline_model,
             tokenizer=tokenizer,
@@ -509,7 +463,6 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         ):
             token_count += 1
             
-            # 🔍 DEBUG: Log first 10 tokens and every 50th token
             if token_count <= 10 or token_count % 50 == 0:
                 try:
                     decoded = tokenizer.decode([response.token])
@@ -517,13 +470,10 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
                 except:
                     logger.info(f"Token {token_count}: {response.token}")
             
-            # 🔍 DEBUG: Check if this is an EOS token
             if hasattr(tokenizer, 'eos_token_ids') and response.token in tokenizer.eos_token_ids:
                 logger.info(f"🛑 EOS token detected at position {token_count}: {response.token}")
                 logger.info(f"   This will cause stream_generate to stop")
 
-            # stream_generate yields GenerationResponse objects
-            # We need to yield (token, logprobs) tuples for compatibility
             yield response.token, response.logprobs
 
         logger.info("=" * 80)
@@ -531,3 +481,21 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         logger.info("=" * 80)
 
     return generate_step
+
+
+def mlx_to_arrow(tensor: mx.array) -> pa.Tensor:
+    """
+    Convert MLX array to PyArrow Tensor via NumPy interop.
+    Preserves dtype and shape for bit-exact serialization.
+    """
+    np_array = mx.to_numpy(tensor)
+    return pa.Tensor.from_numpy(np_array)
+
+
+def arrow_to_mlx(arrow_tensor: pa.Tensor) -> mx.array:
+    """
+    Convert PyArrow Tensor back to MLX array.
+    Preserves original dtype through NumPy.
+    """
+    np_array = arrow_tensor.to_numpy()
+    return mx.array(np_array)

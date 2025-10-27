@@ -5,7 +5,7 @@ This is a lightweight worker node that:
 - Announces itself on the network
 - Receives model files from coordinator
 - Loads assigned model layers
-- Executes inference via gRPC
+- Executes inference via Arrow Flight
 """
 
 import logging
@@ -21,7 +21,7 @@ import uvicorn
 
 from shard.zeroconf.discovery import PeerDiscovery
 from shard.zeroconf.capabilities import SystemCapabilities
-from shard.server.server import serve as grpc_serve
+from shard.server.server import serve as flight_serve  # Updated to Flight
 from shard.server.utils import load_model
 from mlx_lm.tokenizer_utils import load_tokenizer
 
@@ -59,14 +59,14 @@ class PeerServer:
 
     def __init__(
         self,
-        grpc_port: int = 50051,
+        grpc_port: int = 50051,  # Now used for Flight port
         http_port: int = 8081,
         cache_dir: str = "~/.cache/mlx-sharding",
         bind_ip: Optional[str] = None,
         max_ram_gb: Optional[float] = None,
     ):
         self.app = FastAPI(title="MLX Shard Peer", version="2.0.0")
-        self.grpc_port = grpc_port
+        self.grpc_port = grpc_port  # Renamed but kept for Flight
         self.http_port = http_port
         self.bind_ip = bind_ip
         self.max_ram_gb = max_ram_gb
@@ -87,12 +87,12 @@ class PeerServer:
             None  # For localhost peers using local files
         )
 
-        # gRPC server thread
-        self.grpc_thread: Optional[threading.Thread] = None
+        # Flight server thread (replaced gRPC)
+        self.flight_thread: Optional[threading.Thread] = None
 
         self._setup_routes()
 
-        logger.info(f"Peer server initialized (gRPC={grpc_port}, HTTP={http_port})")
+        logger.info(f"Peer server initialized (Flight={grpc_port}, HTTP={http_port})")
         if bind_ip:
             logger.info(f"Binding to IP: {bind_ip}")
         if max_ram_gb:
@@ -375,9 +375,9 @@ class PeerServer:
                 )
                 logger.info(f"✓ Tokenizer loaded with chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
 
-                # Start gRPC server now that model is loaded
-                if self.grpc_thread is None:
-                    self.start_grpc_server(str(model_path), start_layer, end_layer)
+                # Start Flight server now that model is loaded
+                if self.flight_thread is None:
+                    self.start_flight_server(str(model_path), start_layer, end_layer)
 
                 self.state = "ready"
 
@@ -416,15 +416,15 @@ class PeerServer:
             logger.info("Model unloaded")
             return {"success": True, "message": "Model unloaded"}
 
-    def start_grpc_server(self, model_path: str, start_layer: int, end_layer: int):
-        """Start gRPC server in background thread (only after model is loaded)."""
+    def start_flight_server(self, model_path: str, start_layer: int, end_layer: int):
+        """Start Arrow Flight server in background thread (only after model is loaded)."""
         if self.model is None:
-            logger.warning("Cannot start gRPC server without a loaded model")
+            logger.warning("Cannot start Flight server without a loaded model")
             return
 
-        def run_grpc():
-            # Start gRPC server with preloaded model
-            grpc_serve(
+        def run_flight():
+            # Start Flight server with preloaded model
+            flight_serve(
                 model_path,
                 start_layer,
                 end_layer,
@@ -432,15 +432,12 @@ class PeerServer:
                 preloaded_model=self.model,
             )
 
-        self.grpc_thread = threading.Thread(target=run_grpc, daemon=True)
-        self.grpc_thread.start()
-        logger.info(f"✓ gRPC server started on port {self.grpc_port}")
+        self.flight_thread = threading.Thread(target=run_flight, daemon=True)
+        self.flight_thread.start()
+        logger.info(f"✓ Flight server started on port {self.grpc_port}")
 
     def start(self):
         """Start peer server."""
-        # Don't start gRPC server yet - wait for model to be loaded
-        # It will be started when load_model is called
-
         # Announce on network
         self.discovery.announce(self.grpc_port, self.http_port, self.capabilities)
         logger.info(f"✓ Announced on network")
