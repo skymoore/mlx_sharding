@@ -187,7 +187,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
         writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
 
-    writer.done_writing()
+    writer.close()
     return reader  # Return reader to read response
 
 

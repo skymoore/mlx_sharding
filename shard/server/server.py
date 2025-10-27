@@ -181,7 +181,7 @@ class MLXFlightServer(flight.FlightServerBase):
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
 
-            writer.done_writing()
+            writer.close()
 
         except Exception as e:
             logger.error(f"Error in do_exchange: {e}", exc_info=True)
