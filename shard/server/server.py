@@ -135,9 +135,6 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
 
             # Process the tensor (same for both paths)
             if MODEL is not None:
-                # Print progress indicator
-                print(".", end="", flush=True)
-                
                 # Pipeline parallelism: Each peer maintains its OWN cache in memory
                 # The cache persists across tokens within a generation
                 # ResetCache RPC clears it between generations
@@ -160,7 +157,6 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
                         mx.eval([c.state for c in cache_to_use])
                         tensor = tensor[:, PREFILL_STEP_SIZE:]
                         mx.clear_cache()
-                        print(".", end="", flush=True)  # Progress for each chunk
                     
                     # Process remaining tokens (if any)
                     if tensor.shape[1] > 0:

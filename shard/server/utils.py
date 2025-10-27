@@ -142,9 +142,6 @@ def send_tensor(stub, tensor: mx.array, session_id: str = None):
 
     # Small tensor - send directly (backward compatible)
     if len(tensor_bytes) < CHUNK_SIZE_BYTES:
-        # Print progress indicator
-        print(".", end="", flush=True)
-        
         tensor_message = mlx_tensor_pb2.Tensor(
             tensor_data=tensor_bytes, shape=list(tensor.shape), dtype=str(tensor.dtype)
         )
@@ -165,9 +162,6 @@ def send_tensor(stub, tensor: mx.array, session_id: str = None):
         total_chunks = (len(tensor_bytes) + CHUNK_SIZE_BYTES - 1) // CHUNK_SIZE_BYTES
 
         for chunk_idx in range(total_chunks):
-            # Print progress indicator
-            print(".", end="", flush=True)
-            
             start = chunk_idx * CHUNK_SIZE_BYTES
             end = min(start + CHUNK_SIZE_BYTES, len(tensor_bytes))
             chunk_data = tensor_bytes[start:end]
