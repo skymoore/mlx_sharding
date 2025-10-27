@@ -162,7 +162,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 )
 
             # Prepare response: chunk if large
-            logger.debug(f"[{session_id}] Preparing response")
+            logger.info(f"[{session_id}] Preparing response - tensor shape={processed_tensor.shape}, dtype={processed_tensor.dtype}")
             arrow_processed = mlx_to_arrow(processed_tensor)
             np_processed = arrow_processed.to_numpy()
             total_size = np_processed.nbytes
@@ -171,7 +171,8 @@ class MLXFlightServer(flight.FlightServerBase):
             total_items = np_processed.size
             total_chunks_resp = (total_items + chunk_items - 1) // chunk_items
             
-            logger.debug(f"[{session_id}] Response will have {total_chunks_resp} chunks")
+            logger.info(f"[{session_id}] Response tensor: shape={np_processed.shape}, dtype={np_processed.dtype}, "
+                       f"nbytes={total_size}, itemsize={item_size}, total_chunks={total_chunks_resp}")
             
             # Begin writer now that we're ready to send response
             logger.info(f"[{session_id}] Beginning writer with schema")

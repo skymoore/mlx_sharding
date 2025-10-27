@@ -266,6 +266,21 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
                 logger.error(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
                 raise ValueError(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
         
+        # Debug: Check if size matches
+        expected_size = np.prod(shape) * np.dtype(np_dtype).itemsize
+        actual_size = len(full_bytes)
+        logger.info(f"Tensor reconstruction: shape={shape}, dtype={dtype_str} (np.{np_dtype.__name__}), "
+                   f"expected_bytes={expected_size}, actual_bytes={actual_size}")
+        
+        if expected_size != actual_size:
+            logger.error(f"Size mismatch! Expected {expected_size} bytes for shape {shape} with dtype {np_dtype}, "
+                        f"but received {actual_size} bytes")
+            # Try to infer what went wrong
+            if actual_size == expected_size * 2:
+                logger.error("Received 2x expected bytes - possible dtype mismatch (sent float32, expected float16?)")
+            elif actual_size == expected_size // 2:
+                logger.error("Received 0.5x expected bytes - possible dtype mismatch (sent float16, expected float32?)")
+        
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         result = arrow_to_mlx(arrow_tensor)
