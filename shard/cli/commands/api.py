@@ -63,11 +63,10 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
     """Start the MLX Sharding API server (coordinator-only mode)."""
     from shard.api.fastapi import (
         app,
-        load_api_keys,
         run_orchestrator_setup,
         shutdown_coordinator,
-        api_keys as global_api_keys,
     )
+    from shard.api.util import load_api_keys
 
     # Setup logging
     logging.basicConfig(
@@ -79,10 +78,9 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
     if cache_limit_gb:
         mx.metal.set_cache_limit(cache_limit_gb * 1024 * 1024 * 1024)
 
-    # Load API keys
+    # Load API keys into app state
     api_keys = load_api_keys()
-    global_api_keys.clear()
-    global_api_keys.update(api_keys)
+    app.state.api_keys = api_keys
     
     if api_keys:
         logging.info(f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)")
