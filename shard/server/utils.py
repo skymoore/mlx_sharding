@@ -193,8 +193,8 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
 
     logger.debug(f"[{session_id or 'default'}] All chunks sent, done writing")
     writer.done_writing()
-    logger.debug(f"[{session_id or 'default'}] Returning reader for response")
-    return reader  # Return reader to read response
+    logger.debug(f"[{session_id or 'default'}] Returning writer and reader for response")
+    return writer, reader  # Return both so we can send ACK after reading
 
 
 def response_to_mlx_array(reader: flight.FlightStreamReader):
@@ -283,8 +283,19 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
 def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, backoff=1):
     for attempt in range(max_retries):
         try:
-            reader = send_tensor(client, tensor, session_id)
-            return response_to_mlx_array(reader)
+            writer, reader = send_tensor(client, tensor, session_id)
+            result = response_to_mlx_array(reader)
+            
+            # Send ACK to server to prevent premature stream closure
+            try:
+                ack_schema = pa.schema([pa.field("ack", pa.binary())])
+                ack_batch = pa.RecordBatch.from_arrays([pa.array([b"ACK"])], schema=ack_schema)
+                writer.write_metadata(b"ACK")
+                logger.debug(f"[{session_id or 'default'}] Sent ACK to server")
+            except Exception as ack_error:
+                logger.debug(f"[{session_id or 'default'}] Could not send ACK: {ack_error}")
+            
+            return result
         except flight.FlightInternalError as e:
             error_str = str(e)
             if "Checksum mismatch" in error_str:

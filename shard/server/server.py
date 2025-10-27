@@ -230,8 +230,28 @@ class MLXFlightServer(flight.FlightServerBase):
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
 
-            logger.info(f"[{session_id}] do_exchange completing. Closing response stream.")
-            # Stream closes automatically when do_exchange returns - no explicit done_writing() needed
+            logger.info(f"[{session_id}] All response data written")
+            
+            # CRITICAL FIX for race condition:
+            # In bidirectional streaming, if the server returns immediately after writing,
+            # the stream can close before the client has time to read the data, causing
+            # StopIteration on the client side.
+            #
+            # Solution: Wait for the client to send an ACK (empty metadata message) to
+            # signal it has received all the data. This ensures the stream stays open
+            # until the client is done reading.
+            try:
+                logger.debug(f"[{session_id}] Waiting for client ACK...")
+                ack_batch, ack_meta = reader.read_chunk()
+                logger.info(f"[{session_id}] Received client ACK, closing stream")
+            except StopIteration:
+                # Client closed their end, which is fine
+                logger.debug(f"[{session_id}] Client closed stream (no ACK needed)")
+            except Exception as ack_error:
+                # Don't fail if ACK fails - just log it
+                logger.warning(f"[{session_id}] Error waiting for ACK: {ack_error}")
+            
+            logger.info(f"[{session_id}] do_exchange completing. Stream will close on return.")
 
         except Exception as e:
             logger.error(f"[{session_id}] Error in do_exchange: {e}", exc_info=True)
