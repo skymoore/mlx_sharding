@@ -145,23 +145,45 @@ class MLXModelProvider:
 
         # Wrap the generator to close clients after exhaustion
         def generator_with_cleanup():
+            generator = None
             try:
-                # Yield from the actual generator
-                for item in generate_step(
+                # Create the generator
+                generator = generate_step(
                     prompt=prompt,
                     temp=kwargs.get("temperature", 0.7),
                     top_p=kwargs.get("top_p", 1.0),
                     repetition_penalty=kwargs.get("repetition_penalty", 1.0),
                     repetition_context_size=kwargs.get("repetition_context_size", 20),
                     max_tokens=kwargs.get("max_tokens", 256),
-                ):
+                )
+                
+                # Yield all items from the generator
+                for item in generator:
                     yield item
+                    
+            except GeneratorExit:
+                # Generator was closed early by consumer
+                log.debug("Generator closed early by consumer")
+                raise
+            except Exception as e:
+                # Log and re-raise any errors during generation
+                log.error(f"Error during generation: {e}", exc_info=True)
+                raise
             finally:
-                # Clean up clients after generator is exhausted or interrupted
-                for client in clients:
+                # Ensure generator is closed before cleaning up clients
+                if generator is not None:
+                    try:
+                        generator.close()
+                    except:
+                        pass
+                
+                # Clean up clients after generator is fully exhausted
+                log.debug("Cleaning up Flight clients")
+                for i, client in enumerate(clients):
                     try:
                         client.close()
+                        log.debug(f"Closed client {i}")
                     except Exception as e:
-                        log.warning(f"Error closing client: {e}")
+                        log.warning(f"Error closing client {i}: {e}")
 
         return generator_with_cleanup()
