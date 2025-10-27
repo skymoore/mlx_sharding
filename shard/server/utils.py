@@ -359,6 +359,9 @@ class PipelineModel(nn.Module):
         super().__init__()
         self.grpc_stubs = grpc_stubs
         self.session_id = session_id
+        # Add empty layers list to satisfy mlx_lm's cache creation
+        # Peers manage their own caches, so we don't need a local cache
+        self.layers = []
         
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
         """
