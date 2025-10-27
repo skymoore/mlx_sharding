@@ -149,28 +149,40 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     descriptor = flight.FlightDescriptor.for_command("SendTensor")
     writer, reader = client.do_exchange(descriptor)
 
+    # Flatten and compute checksum from the actual bytes we'll send
+    flat_np = np_tensor.flatten()
+    full_bytes = flat_np.tobytes()
+    checksum = hashlib.md5(full_bytes).hexdigest()
+    
+    logger.debug(f"Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, "
+                 f"size={len(full_bytes)} bytes, chunks={total_chunks}, checksum={checksum}")
+    
     # Send metadata in first write (no data)
     meta = {
         "session_id": session_id or "default",
         "total_chunks": total_chunks,
         "shape": list(tensor.shape),
         "dtype": str(tensor.dtype),
-        "md5": hashlib.md5(tensor_to_bytes(tensor)).hexdigest()
+        "md5": checksum
     }
     schema = pa.schema([pa.field("chunk", pa.binary())])
     writer.begin(schema)
     
-    # Send metadata as first batch
-    meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
+    # Send metadata as first batch WITH chunk 0 data
+    if total_chunks > 0:
+        start = 0
+        end = min(chunk_items * item_size, len(full_bytes))
+        chunk0_bytes = full_bytes[start:end]
+        meta_batch = pa.RecordBatch.from_arrays([pa.array([chunk0_bytes])], schema=schema)
+    else:
+        meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
     writer.write_with_metadata(meta_batch, json.dumps(meta).encode())
 
-    # Send chunks
-    flat_np = np_tensor.flatten()
-    for i in range(total_chunks):
-        start = i * chunk_items
-        end = min(start + chunk_items, total_items)
-        chunk_np = flat_np[start:end]
-        chunk_bytes = chunk_np.tobytes()
+    # Send remaining chunks (1 through total_chunks-1)
+    for i in range(1, total_chunks):
+        start = i * chunk_items * item_size
+        end = min(start + chunk_items * item_size, len(full_bytes))
+        chunk_bytes = full_bytes[start:end]
         chunk_array = pa.array([chunk_bytes])
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
         writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
@@ -204,18 +216,18 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         }
         np_dtype = dtype_map.get(dtype_str, np.float32)
 
-        # Collect chunks
+        # Collect chunks (server sends them as separate batches, not in metadata)
         chunks = {}
         for i in range(total_chunks):
             batch, chunk_meta = reader.read_chunk()
             if chunk_meta is None:
-                raise ValueError("Missing chunk metadata")
+                raise ValueError(f"Missing chunk metadata for chunk {i}")
             chunk_dict = json.loads(chunk_meta.to_pybytes())
             chunk_idx = chunk_dict["chunk_index"]
             chunks[chunk_idx] = batch[0][0].as_py()
 
-        # Reassemble
-        full_bytes = b''.join(chunks.get(i, b'') for i in range(total_chunks))
+        # Reassemble in order
+        full_bytes = b''.join(chunks[i] for i in range(total_chunks))
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         return arrow_to_mlx(arrow_tensor)

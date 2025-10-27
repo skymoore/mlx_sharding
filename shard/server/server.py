@@ -103,8 +103,15 @@ class MLXFlightServer(flight.FlightServerBase):
             # Reassemble bytes
             full_bytes = b"".join(chunks.get(i, b"") for i in range(total_chunks))
             received_md5 = hashlib.md5(full_bytes).hexdigest()
-            if received_md5 != meta_dict["md5"]:
-                logger.error(f"Checksum mismatch for session {session_id}")
+            expected_md5 = meta_dict["md5"]
+            
+            logger.debug(f"Received tensor: shape={shape}, dtype={dtype_str}, "
+                        f"size={len(full_bytes)} bytes, chunks={total_chunks}, "
+                        f"expected_checksum={expected_md5}, received_checksum={received_md5}")
+            
+            if received_md5 != expected_md5:
+                logger.error(f"Checksum mismatch for session {session_id}: "
+                           f"expected={expected_md5}, received={received_md5}")
                 raise flight.FlightInternalError("Checksum mismatch")
             if len(full_bytes) == 0:
                 raise flight.FlightInvalidArgument("No data received")
