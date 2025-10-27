@@ -291,13 +291,13 @@ class MLXModelProvider:
         # Use tokenizer's eos_token_ids directly - this is what mlx_lm does
         stop_token_ids = set(self.tokenizer.eos_token_ids)
         
-        logging.debug(f"🛑 Using tokenizer.eos_token_ids: {stop_token_ids}")
+        logging.info(f"🛑 Using tokenizer.eos_token_ids: {stop_token_ids}")
         
         # Decode for debugging
         for token_id in stop_token_ids:
             try:
                 decoded = self.tokenizer.decode([token_id])
-                logging.debug(f"🛑 Stop token {token_id}: {repr(decoded)}")
+                logging.info(f"🛑 Stop token {token_id}: {repr(decoded)}")
             except:
                 pass
         
@@ -314,8 +314,8 @@ class MLXModelProvider:
         
         grpc_stubs, channels = self.connection_pool.create_stubs_for_request()
         
-        # Create generate_step function with fresh stubs
-        generate_step = create_coordinator_generate_step(grpc_stubs)
+        # Create generate_step function with fresh stubs and tokenizer
+        generate_step = create_coordinator_generate_step(grpc_stubs, self.tokenizer)
         
         # Wrap the generator to close channels after exhaustion
         def generator_with_cleanup():
@@ -453,6 +453,26 @@ async def chat_completions(
             tokenize=True,
             add_generation_prompt=True,
         )
+
+        # 🔍 DEBUG: Log prompt details
+        logger.info("=" * 80)
+        logger.info("📝 PROMPT ENCODING")
+        logger.info("=" * 80)
+        logger.info(f"Prompt token IDs: {prompt if len(prompt) < 100 else f'{prompt[:20]}...'}")
+        logger.info(f"Prompt length: {len(prompt)} tokens")
+        try:
+            decoded = model_provider.tokenizer.decode(prompt)
+            logger.info(f"Decoded prompt: {repr(decoded)}")
+        except:
+            pass
+        
+        # 🔍 DEBUG: Check if EOS tokens are in prompt
+        if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+            for eos_id in model_provider.tokenizer.eos_token_ids:
+                if eos_id in prompt:
+                    positions = [i for i, t in enumerate(prompt) if t == eos_id]
+                    logger.warning(f"⚠️  EOS token {eos_id} found in prompt at positions: {positions}")
+        logger.info("=" * 80)
 
         prompt_array = mx.array(prompt)
 

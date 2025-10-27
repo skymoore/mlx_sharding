@@ -392,27 +392,29 @@ class PipelineModel(nn.Module):
         return tensor
 
 
-def create_coordinator_generate_step(grpc_stubs: List):
+def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
     """
     Create generation function for coordinator-only mode (no local model).
     
     This wraps the distributed gRPC pipeline in a PipelineModel and uses
-    mlx_lm's generate_step directly, ensuring identical behavior to local inference.
+    mlx_lm's stream_generate, ensuring identical behavior to local inference
+    INCLUDING proper EOS token detection.
 
     Pipeline flow:
     1. Coordinator sends token IDs (int32) to first peer
     2. First peer embeds tokens and processes through its layers
     3. Each subsequent peer processes hidden states through its layers
     4. Last peer returns logits to coordinator
-    5. mlx_lm's generate_step handles sampling and generation loop
+    5. mlx_lm's stream_generate handles sampling, EOS detection, and generation loop
 
     Args:
         grpc_stubs: Ordered list of gRPC stubs (by layer range)
+        tokenizer: The tokenizer (needed for EOS token detection)
 
     Returns:
         Generator function that yields (token, logprobs) tuples
     """
-    from mlx_lm.generate import generate_step as mlx_generate_step
+    from mlx_lm.generate import stream_generate
     
     def generate_step(
         prompt: mx.array,
@@ -424,15 +426,38 @@ def create_coordinator_generate_step(grpc_stubs: List):
         max_tokens: int = 256,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
         
+        # 🔍 DEBUG: Log generation parameters
+        logger.info("=" * 80)
+        logger.info("🚀 DISTRIBUTED GENERATION START")
+        logger.info("=" * 80)
+        logger.info(f"Prompt shape: {prompt.shape}")
+        logger.info(f"Prompt tokens: {prompt.tolist() if prompt.size < 100 else f'{prompt.tolist()[:20]}...'}")
+        logger.info(f"Max tokens: {max_tokens}")
+        logger.info(f"Temperature: {temp}")
+        logger.info(f"Top-p: {top_p}")
+        logger.info(f"Repetition penalty: {repetition_penalty}")
+        
+        # 🔍 DEBUG: Log tokenizer EOS configuration
+        if hasattr(tokenizer, 'eos_token_ids'):
+            logger.info(f"Tokenizer EOS token IDs: {tokenizer.eos_token_ids}")
+            for eos_id in tokenizer.eos_token_ids:
+                try:
+                    decoded = tokenizer.decode([eos_id])
+                    logger.info(f"  EOS token {eos_id} decodes to: {repr(decoded)}")
+                except:
+                    pass
+        logger.info("=" * 80)
+        
         # Generate unique session ID for this generation
         session_id = str(uuid.uuid4())
+        logger.info(f"Session ID: {session_id}")
         
         # Reset all peer caches at start of generation
-        for stub in grpc_stubs:
+        for i, stub in enumerate(grpc_stubs):
             reset_response = stub.ResetCache(
                 mlx_tensor_pb2.ResetCacheRequest(session_id=session_id)
             )
-            logger.debug(f"ResetCache Response: {reset_response.message}")
+            logger.debug(f"Peer {i} ResetCache Response: {reset_response.message}")
         
         # Create pipeline model wrapper
         pipeline_model = PipelineModel(grpc_stubs, session_id)
@@ -451,16 +476,41 @@ def create_coordinator_generate_step(grpc_stubs: List):
             from mlx_lm.sample_utils import make_sampler
             sampler = make_sampler(temp=temp, top_p=top_p)
         
-        # Use mlx_lm's generate_step directly!
-        # This ensures identical behavior to local inference
-        yield from mlx_generate_step(
-            prompt=prompt,
+        # 🔍 DEBUG: Track generation
+        token_count = 0
+        
+        # Use mlx_lm's stream_generate!
+        # This includes EOS token detection, which generate_step does NOT have
+        for response in stream_generate(
             model=pipeline_model,
+            tokenizer=tokenizer,
+            prompt=prompt,
             max_tokens=max_tokens,
             sampler=sampler,
             logits_processors=logits_processors,
-            prompt_cache=None,  # Peers manage their own caches
-        )
+        ):
+            token_count += 1
+            
+            # 🔍 DEBUG: Log first 10 tokens and every 50th token
+            if token_count <= 10 or token_count % 50 == 0:
+                try:
+                    decoded = tokenizer.decode([response.token])
+                    logger.info(f"Token {token_count}: {response.token} (decoded: {repr(decoded)})")
+                except:
+                    logger.info(f"Token {token_count}: {response.token}")
+            
+            # 🔍 DEBUG: Check if this is an EOS token
+            if hasattr(tokenizer, 'eos_token_ids') and response.token in tokenizer.eos_token_ids:
+                logger.info(f"🛑 EOS token detected at position {token_count}: {response.token}")
+                logger.info(f"   This will cause stream_generate to stop")
+            
+            # stream_generate yields GenerationResponse objects
+            # We need to yield (token, logprobs) tuples for compatibility
+            yield response.token, response.logprobs
+        
+        logger.info("=" * 80)
+        logger.info(f"🏁 DISTRIBUTED GENERATION END - Generated {token_count} tokens")
+        logger.info("=" * 80)
     
     return generate_step
 
