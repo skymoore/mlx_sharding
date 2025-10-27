@@ -71,7 +71,7 @@ class MLXFlightServer(flight.FlightServerBase):
             if meta is None:
                 raise flight.FlightInvalidArgument("No metadata provided")
 
-            meta_dict = json.loads(meta.to_py())
+            meta_dict = json.loads(meta.to_pybytes())
             session_id = meta_dict.get("session_id", "default")
             total_chunks = meta_dict["total_chunks"]
             shape = tuple(meta_dict["shape"])
@@ -96,7 +96,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 batch, chunk_meta = reader.read_chunk()
                 if chunk_meta is None:
                     raise flight.FlightInvalidArgument("Missing chunk metadata")
-                chunk_dict = json.loads(chunk_meta.to_py())
+                chunk_dict = json.loads(chunk_meta.to_pybytes())
                 chunk_idx = chunk_dict["chunk_index"]
                 chunks[chunk_idx] = batch[0][0].as_py()
 

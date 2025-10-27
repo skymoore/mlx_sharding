@@ -159,7 +159,10 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     }
     schema = pa.schema([pa.field("chunk", pa.binary())])
     writer.begin(schema)
-    writer.write_metadata(json.dumps(meta).encode())
+    
+    # Send metadata as first batch
+    meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
+    writer.write_with_metadata(meta_batch, json.dumps(meta).encode())
 
     # Send chunks
     flat_np = np_tensor.flatten()
@@ -170,7 +173,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         chunk_bytes = chunk_np.tobytes()
         chunk_array = pa.array([chunk_bytes])
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
-        writer.write_batch(batch, app_metadata=json.dumps({"chunk_index": i}).encode())
+        writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
 
     writer.done_writing()
     return reader  # Return reader to read response
@@ -183,7 +186,7 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         batch, meta = reader.read_chunk()
         if meta is None:
             raise ValueError("No metadata in response")
-        meta_dict = json.loads(meta.to_py())
+        meta_dict = json.loads(meta.to_pybytes())
 
         if not meta_dict.get("success"):
             raise ValueError(f"Error from shard: {meta_dict.get('message')}")
@@ -207,7 +210,7 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
             batch, chunk_meta = reader.read_chunk()
             if chunk_meta is None:
                 raise ValueError("Missing chunk metadata")
-            chunk_dict = json.loads(chunk_meta.to_py())
+            chunk_dict = json.loads(chunk_meta.to_pybytes())
             chunk_idx = chunk_dict["chunk_index"]
             chunks[chunk_idx] = batch[0][0].as_py()
 
