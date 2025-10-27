@@ -7,11 +7,11 @@ import mlx.core as mx
 from mlx.utils import tree_reduce
 from shard.server.utils import load_model, mlx_to_arrow, arrow_to_mlx
 import numpy as np
-from concurrent import futures
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -22,9 +22,11 @@ CACHE_REQUEST_COUNTS = {}  # session_id -> int (track requests per session)
 # Chunk size for large tensors
 CHUNK_SIZE_BYTES = 2 * 1024 * 1024  # 2MB chunks
 
+
 class MLXFlightAuth(flight.ServerAuthHandler):
     def is_valid(self, token):
         return b""  # No authentication for simplicity
+
 
 def reset_cache(session_id):
     if not session_id:
@@ -38,6 +40,7 @@ def reset_cache(session_id):
         )
     logger.info(f"Cache reset for session {session_id}")
 
+
 class MLXFlightServer(flight.FlightServerBase):
     def __init__(self, location, *args, **kwargs):
         super().__init__(location, auth_handler=MLXFlightAuth(), *args, **kwargs)
@@ -48,7 +51,7 @@ class MLXFlightServer(flight.FlightServerBase):
     def do_action(self, context, action):
         try:
             if action.type == "ResetCache":
-                body = json.loads(action.body.to_py())
+                body = json.loads(action.body.to_pybytes())
                 session_id = body.get("session_id")
                 reset_cache(session_id)
                 return [flight.Result(b"Cache reset successfully")]
@@ -98,7 +101,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 chunks[chunk_idx] = batch[0][0].as_py()
 
             # Reassemble bytes
-            full_bytes = b''.join(chunks.get(i, b'') for i in range(total_chunks))
+            full_bytes = b"".join(chunks.get(i, b"") for i in range(total_chunks))
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             if received_md5 != meta_dict["md5"]:
                 logger.error(f"Checksum mismatch for session {session_id}")
@@ -130,7 +133,9 @@ class MLXFlightServer(flight.FlightServerBase):
             self.cache_request_counts[session_id] += 1
             if self.cache_request_counts[session_id] % 256 == 0:
                 mx.clear_cache()
-                logger.debug(f"Cleared cache after {self.cache_request_counts[session_id]} requests for session {session_id}")
+                logger.debug(
+                    f"Cleared cache after {self.cache_request_counts[session_id]} requests for session {session_id}"
+                )
 
             # Prepare response: chunk if large
             arrow_processed = mlx_to_arrow(processed_tensor)
@@ -165,13 +170,16 @@ class MLXFlightServer(flight.FlightServerBase):
                 chunk_bytes = chunk_np.tobytes()
                 chunk_array = pa.array([chunk_bytes])
                 batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
-                writer.write_batch(batch, app_metadata=json.dumps({"chunk_index": i}).encode())
+                writer.write_batch(
+                    batch, app_metadata=json.dumps({"chunk_index": i}).encode()
+                )
 
             writer.done_writing()
 
         except Exception as e:
             logger.error(f"Error in do_exchange: {e}", exc_info=True)
             raise flight.FlightInternalError(str(e))
+
 
 def serve(
     model_path, start_layer=None, end_layer=None, port=50051, preloaded_model=None
@@ -193,20 +201,20 @@ def serve(
             model_bytes = tree_reduce(
                 lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
                 MODEL,
-                0
+                0,
             )
             max_rec_size = mx.metal.device_info()["max_recommended_working_set_size"]
-            
+
             model_mb = model_bytes // (1024 * 1024)
             max_rec_mb = max_rec_size // (1024 * 1024)
-            
+
             if model_bytes > 0.9 * max_rec_size:
                 logger.warning(
                     f"Model requires {model_mb} MB which is close to the "
                     f"maximum recommended size of {max_rec_mb} MB. "
                     "This may impact performance."
                 )
-            
+
             mx.set_wired_limit(max_rec_size)
             logger.info(f"✓ Wired limit set to {max_rec_mb} MB for peer")
             logger.info(f"✓ Model size: {model_mb} MB")
@@ -222,5 +230,8 @@ def serve(
     if start_layer is not None or end_layer is not None:
         actual_start = start_layer or 0
         actual_end = (end_layer - 1) if end_layer else "end"
-        logger.info(f"Model loaded with layers {actual_start} to {actual_end} (inclusive)")
+        logger.info(
+            f"Model loaded with layers {actual_start} to {actual_end} (inclusive)"
+        )
     server.serve()  # Blocks until shutdown
+

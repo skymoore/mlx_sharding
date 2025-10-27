@@ -31,7 +31,7 @@ from shard.api.completions import (
     generate_chat_completion,
     generate_completion,
 )
-from shard.api.grpc import GRPCConnectionPool
+from shard.api.grpc import FlightConnectionPool
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -331,7 +331,7 @@ async def run_orchestrator_setup(
                 )
 
         # Create connection pool for per-request stub creation
-        connection_pool = GRPCConnectionPool(peer_addresses)
+        connection_pool = FlightConnectionPool(peer_addresses)
 
         # Initialize model provider (coordinator loads NO layers, only coordinates)
         app.state.model_provider = MLXModelProvider(

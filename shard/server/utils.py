@@ -488,7 +488,10 @@ def mlx_to_arrow(tensor: mx.array) -> pa.Tensor:
     Convert MLX array to PyArrow Tensor via NumPy interop.
     Preserves dtype and shape for bit-exact serialization.
     """
-    np_array = mx.to_numpy(tensor)
+    # Handle bfloat16 by converting to float32 first (NumPy doesn't support bfloat16)
+    if tensor.dtype == mx.bfloat16:
+        tensor = tensor.astype(mx.float32)
+    np_array = np.array(tensor, copy=False)  # Zero-copy view when possible
     return pa.Tensor.from_numpy(np_array)
 
 

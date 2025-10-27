@@ -10,7 +10,7 @@ from shard.api.models import (
     Message,
 )
 from shard.api.util import load_api_keys, check_stop_sequences
-from shard.api.grpc import GRPCConnectionPool
+from shard.api.grpc import FlightConnectionPool
 
 __all__ = [
     "app",
@@ -24,5 +24,5 @@ __all__ = [
     "Message",
     "load_api_keys",
     "check_stop_sequences",
-    "GRPCConnectionPool",
+    "FlightConnectionPool",
 ]

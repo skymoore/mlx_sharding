@@ -1,5 +1,5 @@
 from typing import Optional
-from shard.api.grpc import GRPCConnectionPool
+from shard.api.grpc import FlightConnectionPool
 from pathlib import Path
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import hf_repo_to_path
@@ -24,7 +24,7 @@ class MLXModelProvider:
         model_path: str,
         start_layer: Optional[int],
         end_layer: Optional[int],
-        connection_pool: Optional[GRPCConnectionPool] = None,
+        connection_pool: Optional[FlightConnectionPool] = None,
     ):
         self.model_path = model_path
         self.start_layer = start_layer
@@ -129,7 +129,7 @@ class MLXModelProvider:
         if self.connection_pool is None:
             raise ValueError("Connection pool not initialized")
 
-        grpc_stubs, channels = self.connection_pool.create_stubs_for_request()
+        clients = self.connection_pool.create_clients_for_request()
 
         # 🔍 DEBUG: Log tokenizer EOS configuration before generation
         log.info(f"🔍 Tokenizer EOS token IDs before generation: {self.tokenizer.eos_token_ids}")
@@ -140,10 +140,10 @@ class MLXModelProvider:
             except:
                 pass
 
-        # Create generate_step function with fresh stubs and tokenizer
-        generate_step = create_coordinator_generate_step(grpc_stubs, self.tokenizer)
+        # Create generate_step function with fresh clients and tokenizer
+        generate_step = create_coordinator_generate_step(clients, self.tokenizer)
 
-        # Wrap the generator to close channels after exhaustion
+        # Wrap the generator to close clients after exhaustion
         def generator_with_cleanup():
             try:
                 # Yield from the actual generator
@@ -157,11 +157,11 @@ class MLXModelProvider:
                 ):
                     yield item
             finally:
-                # Clean up channels after generator is exhausted or interrupted
-                for channel in channels:
+                # Clean up clients after generator is exhausted or interrupted
+                for client in clients:
                     try:
-                        channel.close()
+                        client.close()
                     except Exception as e:
-                        log.warning(f"Error closing channel: {e}")
+                        log.warning(f"Error closing client: {e}")
 
         return generator_with_cleanup()
