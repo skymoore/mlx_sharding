@@ -105,10 +105,18 @@ class MLXModelProvider:
         Uses the tokenizer's built-in eos_token_ids which is the correct way
         to determine when generation should stop.
         """
-        # Use tokenizer's eos_token_ids directly - this is what mlx_lm does
+        # Use tokenizer's eos_token_ids directly - this is what mlx_lm uses
         stop_token_ids = set(self.tokenizer.eos_token_ids)
 
         log.info(f"🛑 Using tokenizer.eos_token_ids: {stop_token_ids}")
+        
+        # Decode for debugging
+        for token_id in stop_token_ids:
+            try:
+                decoded = self.tokenizer.decode([token_id])
+                log.info(f"🛑 Stop token {token_id}: {repr(decoded)}")
+            except:
+                pass
 
         return stop_token_ids
 
@@ -122,6 +130,15 @@ class MLXModelProvider:
             raise ValueError("Connection pool not initialized")
 
         grpc_stubs, channels = self.connection_pool.create_stubs_for_request()
+
+        # 🔍 DEBUG: Log tokenizer EOS configuration before generation
+        log.info(f"🔍 Tokenizer EOS token IDs before generation: {self.tokenizer.eos_token_ids}")
+        for eos_id in self.tokenizer.eos_token_ids:
+            try:
+                decoded = self.tokenizer.decode([eos_id])
+                log.info(f"🔍 EOS token {eos_id} decodes to: {repr(decoded)}")
+            except:
+                pass
 
         # Create generate_step function with fresh stubs and tokenizer
         generate_step = create_coordinator_generate_step(grpc_stubs, self.tokenizer)
