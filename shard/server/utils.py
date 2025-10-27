@@ -225,6 +225,9 @@ def tensor_to_bytes(tensor):
         raise ValueError("Cannot convert None to bytes")
     # Ensure tensor is evaluated before converting to bytes
     mx.eval(tensor)
+    if tensor.dtype == mx.bfloat16:
+        tensor = tensor.view(mx.uint16)
+
     return bytes(memoryview(tensor))
 
 
@@ -309,9 +312,7 @@ def create_generate_step_with_grpc(grpc_stubs: List):
                 y = y.reshape(1, -1)
             # else y is already (batch, seq_len)
 
-            output = model(y, cache=cache)
-            if output.dtype == mx.bfloat16:
-                output = output.astype(mx.float16)
+            output = model(y, cache=cache) 
 
             for stub in grpc_stubs:
                 response = send_tensor(stub, output)
@@ -504,14 +505,13 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
             if hasattr(tokenizer, 'eos_token_ids') and response.token in tokenizer.eos_token_ids:
                 logger.info(f"🛑 EOS token detected at position {token_count}: {response.token}")
                 logger.info(f"   This will cause stream_generate to stop")
-            
+
             # stream_generate yields GenerationResponse objects
             # We need to yield (token, logprobs) tuples for compatibility
             yield response.token, response.logprobs
-        
+
         logger.info("=" * 80)
         logger.info(f"🏁 DISTRIBUTED GENERATION END - Generated {token_count} tokens")
         logger.info("=" * 80)
-    
-    return generate_step
 
+    return generate_step
