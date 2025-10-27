@@ -147,6 +147,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     total_chunks = (total_items + chunk_items - 1) // chunk_items
 
     descriptor = flight.FlightDescriptor.for_command("SendTensor")
+    logger.debug(f"[{session_id or 'default'}] Starting do_exchange")
     writer, reader = client.do_exchange(descriptor)
 
     # Flatten and compute checksum from the actual bytes we'll send
@@ -154,7 +155,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     full_bytes = flat_np.tobytes()
     checksum = hashlib.md5(full_bytes).hexdigest()
     
-    logger.debug(f"Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, "
+    logger.debug(f"[{session_id or 'default'}] Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, "
                  f"size={len(full_bytes)} bytes, chunks={total_chunks}, checksum={checksum}")
     
     # Send metadata in first write (no data)
@@ -176,9 +177,12 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         meta_batch = pa.RecordBatch.from_arrays([pa.array([chunk0_bytes])], schema=schema)
     else:
         meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
+    
+    logger.debug(f"[{session_id or 'default'}] Sending metadata and chunk 0")
     writer.write_with_metadata(meta_batch, json.dumps(meta).encode())
 
     # Send remaining chunks (1 through total_chunks-1)
+    logger.debug(f"[{session_id or 'default'}] Sending {total_chunks - 1} remaining chunks")
     for i in range(1, total_chunks):
         start = i * chunk_items * item_size
         end = min(start + chunk_items * item_size, len(full_bytes))
@@ -187,7 +191,9 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
         writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
 
-    # Don't explicitly close - Flight framework handles this
+    logger.debug(f"[{session_id or 'default'}] All chunks sent, done writing")
+    writer.done_writing()
+    logger.debug(f"[{session_id or 'default'}] Returning reader for response")
     return reader  # Return reader to read response
 
 
@@ -195,14 +201,21 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
     """Convert Flight response to MLX array."""
     try:
         # Read metadata batch
+        logger.debug("Reading response metadata from server")
         try:
             batch, meta = reader.read_chunk()
-        except StopIteration:
+            logger.debug(f"Received batch: {batch is not None}, meta: {meta is not None}")
+        except StopIteration as e:
+            logger.error(f"StopIteration when reading first chunk: {e}")
             raise ValueError("No data received from server - stream ended prematurely. The server may have crashed or encountered an error before sending a response.")
+        except Exception as e:
+            logger.error(f"Exception when reading first chunk: {type(e).__name__}: {e}")
+            raise
             
         if meta is None:
             raise ValueError("No metadata in response")
         meta_dict = json.loads(meta.to_pybytes())
+        logger.debug(f"Response metadata: {meta_dict}")
 
         if not meta_dict.get("success"):
             error_msg = meta_dict.get('message', 'Unknown error')
