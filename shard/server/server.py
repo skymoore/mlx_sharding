@@ -181,7 +181,7 @@ class MLXFlightServer(flight.FlightServerBase):
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
 
-            writer.close()
+            # Don't explicitly close - Flight framework handles this
 
         except Exception as e:
             logger.error(f"Error in do_exchange: {e}", exc_info=True)

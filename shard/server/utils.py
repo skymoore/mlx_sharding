@@ -187,7 +187,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
         writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
 
-    writer.close()
+    # Don't explicitly close - Flight framework handles this
     return reader  # Return reader to read response
 
 
@@ -195,7 +195,11 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
     """Convert Flight response to MLX array."""
     try:
         # Read metadata batch
-        batch, meta = reader.read_chunk()
+        try:
+            batch, meta = reader.read_chunk()
+        except StopIteration:
+            raise ValueError("No data received from server - stream ended prematurely")
+            
         if meta is None:
             raise ValueError("No metadata in response")
         meta_dict = json.loads(meta.to_pybytes())
@@ -206,6 +210,8 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         total_chunks = meta_dict["total_chunks"]
         shape = tuple(meta_dict["shape"])
         dtype_str = meta_dict["dtype"]
+        
+        logger.debug(f"Response metadata: shape={shape}, dtype={dtype_str}, chunks={total_chunks}")
 
         dtype_map = {
             "mlx.core.float32": np.float32,
@@ -219,7 +225,11 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         # Collect chunks (server sends them as separate batches, not in metadata)
         chunks = {}
         for i in range(total_chunks):
-            batch, chunk_meta = reader.read_chunk()
+            try:
+                batch, chunk_meta = reader.read_chunk()
+            except StopIteration:
+                raise ValueError(f"Stream ended prematurely at chunk {i}/{total_chunks}")
+                
             if chunk_meta is None:
                 raise ValueError(f"Missing chunk metadata for chunk {i}")
             chunk_dict = json.loads(chunk_meta.to_pybytes())
