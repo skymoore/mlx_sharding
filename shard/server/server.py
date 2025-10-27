@@ -166,7 +166,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 "total_chunks": total_chunks_resp,
             }
             meta_batch = pa.RecordBatch.from_arrays([pa.array([])], schema=resp_schema)
-            writer.write_batch(meta_batch, app_metadata=json.dumps(resp_meta).encode())
+            writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
 
             # Send chunks
             flat_np = np_processed.flatten()
@@ -177,8 +177,8 @@ class MLXFlightServer(flight.FlightServerBase):
                 chunk_bytes = chunk_np.tobytes()
                 chunk_array = pa.array([chunk_bytes])
                 batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
-                writer.write_batch(
-                    batch, app_metadata=json.dumps({"chunk_index": i}).encode()
+                writer.write_with_metadata(
+                    batch, json.dumps({"chunk_index": i}).encode()
                 )
 
             writer.done_writing()
