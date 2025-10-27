@@ -383,12 +383,28 @@ class PipelineModel(nn.Module):
             inputs = inputs.reshape(1, -1)
         
         # Send through pipeline
-        tensor = inputs
-        for i, stub in enumerate(self.grpc_stubs):
-            response = send_tensor(stub, tensor, session_id=self.session_id)
-            tensor = response_to_mlx_array(response)
-            if tensor is None:
-                raise ValueError(f"Peer {i} returned None")
+        step = 2048
+        if inputs.dtype == mx.int32 and inputs.shape[1] > step:
+            processed = None
+            while inputs.shape[1] > 0:
+                chunk_size = min(step, inputs.shape[1])
+                tensor = inputs[:, :chunk_size]
+                for i, stub in enumerate(self.grpc_stubs):
+                    response = send_tensor(stub, tensor, session_id=self.session_id)
+                    tensor = response_to_mlx_array(response)
+                    if tensor is None:
+                        raise ValueError(f"Peer {i} returned None")
+                processed = tensor  # Keep last chunk's output (logits for last positions)
+                inputs = inputs[:, chunk_size:]
+                mx.clear_cache()  # Optional: clear after each chunk to manage memory
+            return processed
+        else:
+            tensor = inputs
+            for i, stub in enumerate(self.grpc_stubs):
+                response = send_tensor(stub, tensor, session_id=self.session_id)
+                tensor = response_to_mlx_array(response)
+                if tensor is None:
+                    raise ValueError(f"Peer {i} returned None")
         
         # tensor is now logits from last peer with shape (batch, seq_len, vocab_size)
         return tensor
@@ -513,5 +529,6 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         logger.info("=" * 80)
         logger.info(f"🏁 DISTRIBUTED GENERATION END - Generated {token_count} tokens")
         logger.info("=" * 80)
-
+    
     return generate_step
+

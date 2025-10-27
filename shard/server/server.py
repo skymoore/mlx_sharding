@@ -147,27 +147,7 @@ class MLXTensorServicer(mlx_tensor_pb2_grpc.MLXTensorServiceServicer):
 
                 # 🔥 NEW: Prefill chunking for large inputs (like initial prompt)
                 # This prevents OOM on long prompts by processing in chunks
-                if tensor.shape[1] > PREFILL_STEP_SIZE:
-                    logger.info(f"Chunking large input: {tensor.shape[1]} tokens")
-                    
-                    # Process all but the last chunk
-                    while tensor.shape[1] > PREFILL_STEP_SIZE:
-                        chunk = tensor[:, :PREFILL_STEP_SIZE]
-                        MODEL(chunk, cache=cache_to_use)
-                        mx.eval([c.state for c in cache_to_use])
-                        tensor = tensor[:, PREFILL_STEP_SIZE:]
-                        mx.clear_cache()
-                    
-                    # Process remaining tokens (if any)
-                    if tensor.shape[1] > 0:
-                        processed_tensor = MODEL(tensor, cache=cache_to_use)
-                    else:
-                        # All tokens were processed in chunks, return dummy tensor
-                        # This shouldn't happen but handle it gracefully
-                        processed_tensor = mx.zeros((1, 1, MODEL.args.hidden_size))
-                else:
-                    # Normal single-token or small batch processing
-                    processed_tensor = MODEL(tensor, cache=cache_to_use)
+                processed_tensor = MODEL(tensor, cache=cache_to_use)
 
                 # 🔥 NEW: Track request count for periodic cache clearing
                 if session_id not in CACHE_REQUEST_COUNTS:
