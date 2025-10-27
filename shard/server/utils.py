@@ -198,14 +198,15 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         try:
             batch, meta = reader.read_chunk()
         except StopIteration:
-            raise ValueError("No data received from server - stream ended prematurely")
+            raise ValueError("No data received from server - stream ended prematurely. The server may have crashed or encountered an error before sending a response.")
             
         if meta is None:
             raise ValueError("No metadata in response")
         meta_dict = json.loads(meta.to_pybytes())
 
         if not meta_dict.get("success"):
-            raise ValueError(f"Error from shard: {meta_dict.get('message')}")
+            error_msg = meta_dict.get('message', 'Unknown error')
+            raise ValueError(f"Error from shard: {error_msg}")
 
         total_chunks = meta_dict["total_chunks"]
         shape = tuple(meta_dict["shape"])
@@ -245,7 +246,7 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         full_bytes = b''.join(chunks[i] for i in range(total_chunks))
         
         # Verify checksum if provided
-        if "md5" in meta_dict:
+        if "md5" in meta_dict and meta_dict["md5"]:
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             expected_md5 = meta_dict["md5"]
             if received_md5 != expected_md5:
@@ -256,9 +257,12 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         return arrow_to_mlx(arrow_tensor)
 
+    except ValueError:
+        # Re-raise ValueError as-is (these are our custom error messages)
+        raise
     except Exception as e:
         logger.error(f"Error converting response to MLX array: {e}", exc_info=True)
-        raise e
+        raise ValueError(f"Failed to process server response: {e}") from e
 
 
 def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, backoff=1):
@@ -267,10 +271,23 @@ def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, back
             reader = send_tensor(client, tensor, session_id)
             return response_to_mlx_array(reader)
         except flight.FlightInternalError as e:
-            if "Checksum mismatch" in str(e):
+            error_str = str(e)
+            if "Checksum mismatch" in error_str:
                 if attempt < max_retries - 1:
                     logger.warning(f"Checksum mismatch, retrying ({attempt+1}/{max_retries})")
                     time.sleep(backoff)
+                    continue
+                else:
+                    raise
+            else:
+                raise
+        except ValueError as e:
+            error_str = str(e)
+            # Retry on premature stream end errors
+            if "stream ended prematurely" in error_str.lower() or "no data received" in error_str.lower():
+                if attempt < max_retries - 1:
+                    logger.warning(f"Stream ended prematurely, retrying ({attempt+1}/{max_retries}): {e}")
+                    time.sleep(backoff * (attempt + 1))  # Exponential backoff
                     continue
                 else:
                     raise

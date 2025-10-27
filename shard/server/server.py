@@ -61,6 +61,7 @@ class MLXFlightServer(flight.FlightServerBase):
             raise flight.FlightInternalError(str(e))
 
     def do_exchange(self, context, descriptor, reader, writer):
+        writer_begun = False
         try:
             command = descriptor.command.decode()
             if command != "SendTensor":
@@ -156,6 +157,7 @@ class MLXFlightServer(flight.FlightServerBase):
             # Response schema
             resp_schema = pa.schema([pa.field("chunk", pa.binary())])
             writer.begin(resp_schema)
+            writer_begun = True
 
             # Prepare chunks
             flat_np = np_processed.flatten()
@@ -200,7 +202,25 @@ class MLXFlightServer(flight.FlightServerBase):
 
         except Exception as e:
             logger.error(f"Error in do_exchange: {e}", exc_info=True)
-            raise flight.FlightInternalError(str(e))
+            # If writer has begun, send error response through stream
+            if writer_begun:
+                try:
+                    error_meta = {
+                        "success": False,
+                        "message": str(e),
+                        "shape": [0],
+                        "dtype": "mlx.core.float32",
+                        "total_chunks": 1,
+                        "md5": "",
+                    }
+                    resp_schema = pa.schema([pa.field("chunk", pa.binary())])
+                    error_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=resp_schema)
+                    writer.write_with_metadata(error_batch, json.dumps(error_meta).encode())
+                except Exception as write_error:
+                    logger.error(f"Failed to send error response: {write_error}")
+            else:
+                # If writer hasn't begun, we can raise the exception normally
+                raise flight.FlightInternalError(str(e))
 
 
 def serve(
