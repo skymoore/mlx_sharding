@@ -239,6 +239,22 @@ class MLXModelProvider:
             else hf_repo_to_path(model_path)
         )
         self.tokenizer = load_tokenizer(tokenizer_path)
+        
+        # 🔥 FIX: Ensure tokenizer has correct eos_token_ids from config
+        # load_tokenizer doesn't set this up correctly, but load() does
+        config_path = tokenizer_path / "config.json"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+                # Set eos_token_ids from config if present
+                if "eos_token_id" in config:
+                    eos_ids = config["eos_token_id"]
+                    # Handle both single ID and list of IDs
+                    if isinstance(eos_ids, list):
+                        self.tokenizer.eos_token_ids = set(eos_ids)
+                    else:
+                        self.tokenizer.eos_token_ids = {eos_ids}
+                    logging.info(f"✓ Set tokenizer.eos_token_ids from config: {self.tokenizer.eos_token_ids}")
 
         # Coordinator mode: no local layers
         if start_layer is None and end_layer is None:

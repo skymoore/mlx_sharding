@@ -353,9 +353,16 @@ class PipelineModel(nn.Module):
         super().__init__()
         self.grpc_stubs = grpc_stubs
         self.session_id = session_id
-        # Add empty layers list to satisfy mlx_lm's cache creation
-        # Peers manage their own caches, so we don't need a local cache
+        # Peers manage their own caches, so we return an empty cache list
+        # This prevents mlx_lm from trying to create caches based on self.layers
         self.layers = []
+    
+    def make_cache(self):
+        """
+        Return empty cache list since peers manage their own caches.
+        This prevents mlx_lm's _make_cache from creating BatchKVCache objects.
+        """
+        return []
         
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
         """
