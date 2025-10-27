@@ -327,6 +327,7 @@ class MLXModelProvider:
                     top_p=kwargs.get("top_p", 1.0),
                     repetition_penalty=kwargs.get("repetition_penalty", 1.0),
                     repetition_context_size=kwargs.get("repetition_context_size", 20),
+                    max_tokens=kwargs.get("max_tokens", 256),
                 ):
                     yield item
             finally:
@@ -533,6 +534,7 @@ async def generate_chat_completion(
             top_p=request.top_p,
             repetition_penalty=request.repetition_penalty,
             repetition_context_size=request.repetition_context_size,
+            max_tokens=request.max_tokens,
         ),
         range(request.max_tokens),
     ):
@@ -644,6 +646,7 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
                 top_p=request.top_p,
                 repetition_penalty=request.repetition_penalty,
                 repetition_context_size=request.repetition_context_size,
+                max_tokens=request.max_tokens,
             ),
             range(request.max_tokens),
         ):
