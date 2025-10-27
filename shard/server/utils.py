@@ -335,10 +335,10 @@ def create_generate_step_with_grpc(grpc_stubs: List):
             return y, logprobs.squeeze(0)
 
         y, logprobs = _step(y)
-        mx.async_eval(y)
+        mx.eval(y)
         while True:
             next_y, next_logprobs = _step(y)
-            mx.async_eval(next_y)
+            mx.eval(next_y)
             yield y.item(), logprobs
             y, logprobs = next_y, next_logprobs
 
@@ -529,6 +529,5 @@ def create_coordinator_generate_step(grpc_stubs: List, tokenizer):
         logger.info("=" * 80)
         logger.info(f"🏁 DISTRIBUTED GENERATION END - Generated {token_count} tokens")
         logger.info("=" * 80)
-    
-    return generate_step
 
+    return generate_step
