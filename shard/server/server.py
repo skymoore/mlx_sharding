@@ -130,9 +130,9 @@ class MLXFlightServer(flight.FlightServerBase):
             np_array = np_array.reshape(shape)
 
             # Convert to MLX
-            logger.debug(f"[{session_id}] Converting to MLX tensor")
+            logger.debug(f"[{session_id}] Converting to MLX tensor with dtype={dtype_str}")
             arrow_tensor = pa.Tensor.from_numpy(np_array)
-            tensor = arrow_to_mlx(arrow_tensor)
+            tensor = arrow_to_mlx(arrow_tensor, dtype_str)
 
             # Process tensor
             if self.model is None:
@@ -163,7 +163,7 @@ class MLXFlightServer(flight.FlightServerBase):
 
             # Prepare response: chunk if large
             logger.info(f"[{session_id}] Preparing response - tensor shape={processed_tensor.shape}, dtype={processed_tensor.dtype}")
-            arrow_processed = mlx_to_arrow(processed_tensor)
+            arrow_processed, original_dtype = mlx_to_arrow(processed_tensor)
             np_processed = arrow_processed.to_numpy()
             total_size = np_processed.nbytes
             item_size = np_processed.itemsize
@@ -187,30 +187,19 @@ class MLXFlightServer(flight.FlightServerBase):
             # Prepare chunks
             flat_np = np_processed.flatten()
             
-            # CRITICAL: Use the actual NumPy dtype being sent, not the MLX dtype
-            # mlx_to_arrow() may convert types (e.g., bfloat16 -> float32)
-            # Map NumPy dtype back to MLX dtype string for metadata
-            np_to_mlx_dtype = {
-                'float32': 'mlx.core.float32',
-                'float16': 'mlx.core.float16',
-                'int32': 'mlx.core.int32',
-                'int64': 'mlx.core.int64',
-                'uint16': 'mlx.core.bfloat16',  # bfloat16 is stored as uint16 in numpy
-            }
-            actual_dtype_str = np_to_mlx_dtype.get(np_processed.dtype.name, f'mlx.core.{np_processed.dtype.name}')
-            
             # Send metadata with chunk 0 data
+            # Use original_dtype from mlx_to_arrow which preserves bfloat16 info
             resp_meta = {
                 "success": True,
                 "message": "Tensor processed successfully",
                 "shape": list(processed_tensor.shape),
-                "dtype": actual_dtype_str,  # Use actual dtype being sent, not original MLX dtype
+                "dtype": original_dtype,  # Original MLX dtype (preserves bfloat16)
                 "total_chunks": total_chunks_resp,
                 "md5": hashlib.md5(flat_np.tobytes()).hexdigest(),
             }
             
-            logger.info(f"[{session_id}] Metadata: original_dtype={processed_tensor.dtype}, "
-                       f"numpy_dtype={np_processed.dtype}, sending_as={actual_dtype_str}")
+            logger.info(f"[{session_id}] Metadata: original_dtype={original_dtype}, "
+                       f"numpy_dtype={np_processed.dtype}, nbytes={flat_np.nbytes}")
             
             logger.info(f"[{session_id}] Sending metadata and chunk 0 (total_chunks={total_chunks_resp})")
             # First chunk (chunk 0) sent with metadata

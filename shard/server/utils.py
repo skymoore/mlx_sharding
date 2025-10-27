@@ -138,7 +138,7 @@ def load_model(
 
 def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str = None):
     """Send tensor using Arrow Flight, automatically chunking if needed."""
-    arrow_tensor = mlx_to_arrow(tensor)
+    arrow_tensor, original_dtype = mlx_to_arrow(tensor)
     np_tensor = arrow_tensor.to_numpy()
     total_size = np_tensor.nbytes
     item_size = np_tensor.itemsize
@@ -155,15 +155,16 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     full_bytes = flat_np.tobytes()
     checksum = hashlib.md5(full_bytes).hexdigest()
     
-    logger.debug(f"[{session_id or 'default'}] Sending tensor: shape={tensor.shape}, dtype={tensor.dtype}, "
+    logger.debug(f"[{session_id or 'default'}] Sending tensor: shape={tensor.shape}, dtype={original_dtype}, "
                  f"size={len(full_bytes)} bytes, chunks={total_chunks}, checksum={checksum}")
     
     # Send metadata in first write (no data)
+    # IMPORTANT: Send original_dtype so receiver can reconstruct bfloat16
     meta = {
         "session_id": session_id or "default",
         "total_chunks": total_chunks,
         "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype),
+        "dtype": original_dtype,  # Original MLX dtype (e.g., "mlx.core.bfloat16")
         "md5": checksum
     }
     schema = pa.schema([pa.field("chunk", pa.binary())])
@@ -283,7 +284,8 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
-        result = arrow_to_mlx(arrow_tensor)
+        # Pass original dtype to reconstruct bfloat16 correctly
+        result = arrow_to_mlx(arrow_tensor, dtype_str)
         logger.info("Finished reading tensor response from server")
         return result
 
@@ -580,22 +582,41 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
     return generate_step
 
 
-def mlx_to_arrow(tensor: mx.array) -> pa.Tensor:
+def mlx_to_arrow(tensor: mx.array) -> Tuple[pa.Tensor, str]:
     """
     Convert MLX array to PyArrow Tensor via NumPy interop.
     Preserves dtype and shape for bit-exact serialization.
+    
+    Returns:
+        Tuple of (arrow_tensor, original_dtype_str) where original_dtype_str
+        is needed to reconstruct bfloat16 (which is stored as uint16)
     """
-    # Handle bfloat16 by converting to float32 first (NumPy doesn't support bfloat16)
+    original_dtype = str(tensor.dtype)
+    
+    # Handle bfloat16 by viewing as uint16 (preserves exact bits, no precision loss)
+    # NumPy/Arrow don't support bfloat16, but we can store the raw 16-bit values
     if tensor.dtype == mx.bfloat16:
-        tensor = tensor.astype(mx.float32)
+        tensor = tensor.view(mx.uint16)
+    
     np_array = np.array(tensor, copy=False)  # Zero-copy view when possible
-    return pa.Tensor.from_numpy(np_array)
+    return pa.Tensor.from_numpy(np_array), original_dtype
 
 
-def arrow_to_mlx(arrow_tensor: pa.Tensor) -> mx.array:
+def arrow_to_mlx(arrow_tensor: pa.Tensor, original_dtype: str = None) -> mx.array:
     """
     Convert PyArrow Tensor back to MLX array.
     Preserves original dtype through NumPy.
+    
+    Args:
+        arrow_tensor: PyArrow tensor to convert
+        original_dtype: Original MLX dtype string (e.g., "mlx.core.bfloat16")
+                       Required for bfloat16 reconstruction
     """
     np_array = arrow_tensor.to_numpy()
-    return mx.array(np_array)
+    mlx_array = mx.array(np_array)
+    
+    # If original dtype was bfloat16, view the uint16 data back as bfloat16
+    if original_dtype == "mlx.core.bfloat16":
+        mlx_array = mlx_array.view(mx.bfloat16)
+    
+    return mlx_array
