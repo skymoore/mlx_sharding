@@ -282,48 +282,25 @@ class MLXModelProvider:
         # Chat templates are handled by the tokenizer's built-in apply_chat_template()
         logging.info(f"✓ Chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
 
-    def get_default_stop_sequences(self) -> List[str]:
-        """Get model-specific default stop sequences."""
-        # Use stored model_type instead of trying to get it from self.model
-        # (which is None in coordinator mode)
-        model_type = self.model_type
-
-        # Model-specific stop sequences
-        if model_type == "qwen3_moe" or model_type.startswith("qwen"):
-            return ["<|im_end|>", "<|endoftext|>"]
-        elif model_type == "glm4_moe" or model_type.startswith("glm"):
-            return ["<|user|>", "<|endoftext|>", "<|observation|>", "<|assistant|>"]
-        else:
-            # Generic stop sequences
-            return ["<|endoftext|>"]
-
-    def get_stop_token_ids(self) -> List[int]:
-        """Get token IDs for stop sequences to check during generation."""
-        stop_sequences = self.get_default_stop_sequences()
-        stop_token_ids = []
-
-        logging.debug(f"🛑 Getting stop token IDs for model_type: {self.model_type}")
-        logging.debug(f"🛑 Stop sequences: {stop_sequences}")
-
-        for seq in stop_sequences:
+    def get_stop_token_ids(self) -> set:
+        """
+        Get token IDs for stop sequences to check during generation.
+        Uses the tokenizer's built-in eos_token_ids which is the correct way
+        to determine when generation should stop.
+        """
+        # Use tokenizer's eos_token_ids directly - this is what mlx_lm does
+        stop_token_ids = set(self.tokenizer.eos_token_ids)
+        
+        logging.debug(f"🛑 Using tokenizer.eos_token_ids: {stop_token_ids}")
+        
+        # Decode for debugging
+        for token_id in stop_token_ids:
             try:
-                # Encode the stop sequence to get its token ID(s)
-                tokens = self.tokenizer.encode(seq)
-                # If it's a single token, add it to our list
-                if len(tokens) == 1:
-                    stop_token_ids.append(tokens[0])
-                    logging.debug(f"🛑 Added stop token: {seq} -> {tokens[0]}")
-                else:
-                    logging.warning(f"🛑 Skipped multi-token sequence: {seq} -> {tokens}")
-            except Exception as e:
-                logging.warning(f"🛑 Failed to encode {seq}: {e}")
-
-        # Always include EOS token
-        if self.tokenizer.eos_token_id is not None:
-            stop_token_ids.append(self.tokenizer.eos_token_id)
-            logging.debug(f"🛑 Added EOS token: {self.tokenizer.eos_token_id}")
-
-        logging.debug(f"🛑 Final stop_token_ids: {stop_token_ids}")
+                decoded = self.tokenizer.decode([token_id])
+                logging.debug(f"🛑 Stop token {token_id}: {repr(decoded)}")
+            except:
+                pass
+        
         return stop_token_ids
 
     def generate(self, prompt: mx.array, **kwargs):
@@ -536,7 +513,7 @@ async def generate_chat_completion(
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
 
-    # Prepare stop sequences
+    # Prepare stop sequences (user-provided strings only)
     stop_sequences = []
     if request.stop:
         if isinstance(request.stop, str):
@@ -544,10 +521,7 @@ async def generate_chat_completion(
         else:
             stop_sequences = request.stop
 
-    # Add model-specific default stop sequences
-    stop_sequences.extend(model_provider.get_default_stop_sequences())
-
-    # Get stop token IDs for faster checking
+    # Get stop token IDs from tokenizer (this is what mlx_lm uses)
     stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
@@ -649,16 +623,15 @@ async def stream_chat_completion(request: ChatCompletionRequest, prompt: mx.arra
     if request.tools:
         streaming_parser = model_provider.tool_manager.create_streaming_parser()
 
-    # Prepare stop sequences
+    # Prepare stop sequences (user-provided strings only)
     stop_sequences = []
     if request.stop:
         if isinstance(request.stop, str):
             stop_sequences = [request.stop]
         else:
             stop_sequences = request.stop
-    stop_sequences.extend(model_provider.get_default_stop_sequences())
 
-    # Get stop token IDs for faster checking
+    # Get stop token IDs from tokenizer (this is what mlx_lm uses)
     stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
