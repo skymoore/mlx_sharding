@@ -157,20 +157,35 @@ class MLXFlightServer(flight.FlightServerBase):
             resp_schema = pa.schema([pa.field("chunk", pa.binary())])
             writer.begin(resp_schema)
 
-            # Send metadata
+            # Prepare chunks
+            flat_np = np_processed.flatten()
+            
+            # Send metadata with chunk 0 data
             resp_meta = {
                 "success": True,
                 "message": "Tensor processed successfully",
                 "shape": list(processed_tensor.shape),
                 "dtype": str(processed_tensor.dtype),
                 "total_chunks": total_chunks_resp,
+                "md5": hashlib.md5(flat_np.tobytes()).hexdigest(),
             }
-            meta_batch = pa.RecordBatch.from_arrays([pa.array([])], schema=resp_schema)
-            writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
+            
+            # First chunk (chunk 0) sent with metadata
+            if total_chunks_resp > 0:
+                start = 0
+                end = min(chunk_items, total_items)
+                chunk_np = flat_np[start:end]
+                chunk_bytes = chunk_np.tobytes()
+                chunk_array = pa.array([chunk_bytes])
+                meta_batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
+                writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
+            else:
+                # Edge case: empty tensor
+                meta_batch = pa.RecordBatch.from_arrays([pa.array([])], schema=resp_schema)
+                writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
 
-            # Send chunks
-            flat_np = np_processed.flatten()
-            for i in range(total_chunks_resp):
+            # Send remaining chunks (1 through N-1)
+            for i in range(1, total_chunks_resp):
                 start = i * chunk_items
                 end = min(start + chunk_items, total_items)
                 chunk_np = flat_np[start:end]

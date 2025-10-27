@@ -222,9 +222,14 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         }
         np_dtype = dtype_map.get(dtype_str, np.float32)
 
-        # Collect chunks (server sends them as separate batches, not in metadata)
+        # Collect chunks
+        # Chunk 0 comes with metadata batch
         chunks = {}
-        for i in range(total_chunks):
+        if batch and batch.num_rows > 0:
+            chunks[0] = batch[0][0].as_py()
+        
+        # Read remaining chunks (1 through N-1)
+        for i in range(1, total_chunks):
             try:
                 batch, chunk_meta = reader.read_chunk()
             except StopIteration:
@@ -238,6 +243,15 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
 
         # Reassemble in order
         full_bytes = b''.join(chunks[i] for i in range(total_chunks))
+        
+        # Verify checksum if provided
+        if "md5" in meta_dict:
+            received_md5 = hashlib.md5(full_bytes).hexdigest()
+            expected_md5 = meta_dict["md5"]
+            if received_md5 != expected_md5:
+                logger.error(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
+                raise ValueError(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
+        
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         return arrow_to_mlx(arrow_tensor)
