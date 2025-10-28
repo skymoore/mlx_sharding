@@ -32,6 +32,7 @@ async def generate_chat_completion(
     stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
+    start_time = time.time()
 
     for (token, _), n in zip(
         model_provider.generate(
@@ -65,6 +66,18 @@ async def generate_chat_completion(
 
         if n % 256 == 0:
             mx.clear_cache()
+
+    generation_time = time.time() - start_time
+    tokens_per_second = len(tokens) / generation_time if generation_time > 0 else 0
+    
+    log.info("=" * 80)
+    log.info(f"🏁 GENERATION COMPLETE")
+    log.info(f"   Prompt tokens: {len(prompt)}")
+    log.info(f"   Completion tokens: {len(tokens)}")
+    log.info(f"   Total tokens: {len(prompt) + len(tokens)}")
+    log.info(f"   Generation time: {generation_time:.2f}s")
+    log.info(f"   Tokens/second: {tokens_per_second:.2f}")
+    log.info("=" * 80)
 
     detokenizer.finalize()
     text = detokenizer.text
@@ -141,6 +154,8 @@ async def stream_chat_completion(
     stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
+    token_count = 0
+    start_time = time.time()
 
     try:
         for (token, _), n in zip(
@@ -155,6 +170,7 @@ async def stream_chat_completion(
             ),
             range(request.max_tokens),
         ):
+            token_count += 1
             detokenizer.add_token(token)
 
             # Check for stop tokens by ID (faster and more reliable)
@@ -316,6 +332,19 @@ async def stream_chat_completion(
             if streaming_parser.emitted_tool_calls:
                 finish_reason = "tool_calls"
 
+        # Log generation statistics
+        generation_time = time.time() - start_time
+        tokens_per_second = token_count / generation_time if generation_time > 0 else 0
+        
+        log.info("=" * 80)
+        log.info(f"🏁 GENERATION COMPLETE")
+        log.info(f"   Prompt tokens: {len(prompt)}")
+        log.info(f"   Completion tokens: {token_count}")
+        log.info(f"   Total tokens: {len(prompt) + token_count}")
+        log.info(f"   Generation time: {generation_time:.2f}s")
+        log.info(f"   Tokens/second: {tokens_per_second:.2f}")
+        log.info("=" * 80)
+
         # Send final chunk
         final_chunk = {
             "id": request_id,
@@ -355,6 +384,7 @@ async def generate_completion(
     tokens = []
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
+    start_time = time.time()
 
     for (token, _), _ in zip(
         model_provider.generate(
@@ -372,6 +402,18 @@ async def generate_completion(
 
         if token == model_provider.tokenizer.eos_token_id:
             break
+
+    generation_time = time.time() - start_time
+    tokens_per_second = len(tokens) / generation_time if generation_time > 0 else 0
+    
+    log.info("=" * 80)
+    log.info(f"🏁 GENERATION COMPLETE")
+    log.info(f"   Prompt tokens: {len(prompt)}")
+    log.info(f"   Completion tokens: {len(tokens)}")
+    log.info(f"   Total tokens: {len(prompt) + len(tokens)}")
+    log.info(f"   Generation time: {generation_time:.2f}s")
+    log.info(f"   Tokens/second: {tokens_per_second:.2f}")
+    log.info("=" * 80)
 
     detokenizer.finalize()
     text = detokenizer.text
@@ -404,6 +446,8 @@ async def stream_completion(
     request_id = f"cmpl-{uuid.uuid4()}"
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
+    token_count = 0
+    start_time = time.time()
 
     try:
         for (token, _), _ in zip(
@@ -417,6 +461,7 @@ async def stream_completion(
             ),
             range(request.max_tokens),
         ):
+            token_count += 1
             detokenizer.add_token(token)
             text = detokenizer.last_segment
 
@@ -440,6 +485,19 @@ async def stream_completion(
 
             if token == model_provider.tokenizer.eos_token_id:
                 break
+
+        # Log generation statistics
+        generation_time = time.time() - start_time
+        tokens_per_second = token_count / generation_time if generation_time > 0 else 0
+        
+        log.info("=" * 80)
+        log.info(f"🏁 GENERATION COMPLETE")
+        log.info(f"   Prompt tokens: {len(prompt)}")
+        log.info(f"   Completion tokens: {token_count}")
+        log.info(f"   Total tokens: {len(prompt) + token_count}")
+        log.info(f"   Generation time: {generation_time:.2f}s")
+        log.info(f"   Tokens/second: {tokens_per_second:.2f}")
+        log.info("=" * 80)
 
         yield "data: [DONE]\n\n"
 

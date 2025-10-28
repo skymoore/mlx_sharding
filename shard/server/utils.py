@@ -536,6 +536,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
             sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k)
         
         token_count = 0
+        start_time = time.time()
         
         for response in stream_generate(
             model=pipeline_model,
@@ -546,22 +547,16 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
             logits_processors=logits_processors,
         ):
             token_count += 1
-            
-            if token_count <= 10 or token_count % 50 == 0:
-                try:
-                    decoded = tokenizer.decode([response.token])
-                    logger.info(f"Token {token_count}: {response.token} (decoded: {repr(decoded)})")
-                except:
-                    logger.info(f"Token {token_count}: {response.token}")
-            
-            if hasattr(tokenizer, 'eos_token_ids') and response.token in tokenizer.eos_token_ids:
-                logger.info(f"🛑 EOS token detected at position {token_count}: {response.token}")
-                logger.info("   This will cause stream_generate to stop")
-
             yield response.token, response.logprobs
 
+        generation_time = time.time() - start_time
+        tokens_per_second = token_count / generation_time if generation_time > 0 else 0
+        
         logger.info("=" * 80)
-        logger.info(f"🏁 DISTRIBUTED GENERATION END - Generated {token_count} tokens")
+        logger.info(f"🏁 GENERATION COMPLETE")
+        logger.info(f"   Total tokens: {token_count}")
+        logger.info(f"   Generation time: {generation_time:.2f}s")
+        logger.info(f"   Tokens/second: {tokens_per_second:.2f}")
         logger.info("=" * 80)
 
     return generate_step
