@@ -52,6 +52,20 @@ from typing import Optional
     show_default=True,
 )
 @click.option(
+    "--repetition-penalty",
+    type=float,
+    default=1.0,
+    help="Repetition penalty (1.0 = no penalty)",
+    show_default=True,
+)
+@click.option(
+    "--repetition-context-size",
+    type=int,
+    default=20,
+    help="Number of recent tokens to consider for repetition penalty",
+    show_default=True,
+)
+@click.option(
     "--stream/--no-stream",
     default=True,
     help="Stream the response",
@@ -89,6 +103,8 @@ def chat(
     temperature: float,
     top_p: float,
     top_k: Optional[int],
+    repetition_penalty: float,
+    repetition_context_size: int,
     stream: bool,
     system: Optional[str],
     api_key: Optional[str],
@@ -156,6 +172,8 @@ def chat(
         "temperature": temperature,
         "top_p": top_p,
         "stream": stream,
+        "repetition_penalty": repetition_penalty,
+        "repetition_context_size": repetition_context_size,
     }
     if top_k is not None:
         request_data["top_k"] = top_k
