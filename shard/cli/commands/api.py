@@ -1,4 +1,5 @@
 """API server command."""
+
 import click
 import logging
 import asyncio
@@ -73,7 +74,18 @@ import uvicorn
     help="Memory safety margin as fraction (0.15 = 15%)",
     show_default=True,
 )
-def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, chat_template_string, resource_strategy, context_length, safety_margin):
+def api(
+    model,
+    grpc_port,
+    http_port,
+    log_level,
+    cache_limit_gb,
+    chat_template,
+    chat_template_string,
+    resource_strategy,
+    context_length,
+    safety_margin,
+):
     """Start the MLX Sharding API server (coordinator-only mode)."""
     from shard.api.fastapi import (
         app,
@@ -95,9 +107,11 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
     # Load API keys into app state
     api_keys = load_api_keys()
     app.state.api_keys = api_keys
-    
+
     if api_keys:
-        logging.info(f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)")
+        logging.info(
+            f"✓ API key authentication enabled ({len(api_keys)} key(s) loaded)"
+        )
     else:
         logging.warning("⚠ No API keys configured - authentication disabled!")
 
@@ -118,7 +132,6 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
                 model_path=model,
                 grpc_port=grpc_port,
                 http_port=http_port,
-                custom_chat_template=custom_template,
                 resource_strategy=resource_strategy,
                 context_length=context_length,
                 safety_margin=safety_margin,
