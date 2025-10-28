@@ -70,7 +70,6 @@ class MLXFlightServer(flight.FlightServerBase):
             if command != "SendTensor":
                 raise flight.FlightInvalidArgument("Unknown command")
 
-            logger.debug("Starting do_exchange - reading metadata")
             # Read metadata from first chunk
             batch, meta = reader.read_chunk()
             if meta is None:
@@ -81,8 +80,6 @@ class MLXFlightServer(flight.FlightServerBase):
             total_chunks = meta_dict["total_chunks"]
             shape = tuple(meta_dict["shape"])
             dtype_str = meta_dict["dtype"]
-            
-            logger.debug(f"[{session_id}] Received metadata: shape={shape}, dtype={dtype_str}, chunks={total_chunks}")
 
             # Map to NumPy dtype
             dtype_map = {
@@ -99,7 +96,6 @@ class MLXFlightServer(flight.FlightServerBase):
             if batch and batch.num_rows > 0:
                 chunks[0] = batch[0][0].as_py()  # First chunk data if present
 
-            logger.debug(f"[{session_id}] Reading {total_chunks} chunks")
             for i in range(1, total_chunks):
                 batch, chunk_meta = reader.read_chunk()
                 if chunk_meta is None:
@@ -113,10 +109,6 @@ class MLXFlightServer(flight.FlightServerBase):
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             expected_md5 = meta_dict["md5"]
             
-            logger.debug(f"[{session_id}] Received tensor: shape={shape}, dtype={dtype_str}, "
-                        f"size={len(full_bytes)} bytes, chunks={total_chunks}, "
-                        f"expected_checksum={expected_md5}, received_checksum={received_md5}")
-            
             if received_md5 != expected_md5:
                 logger.error(f"[{session_id}] Checksum mismatch: "
                            f"expected={expected_md5}, received={received_md5}")
@@ -125,12 +117,10 @@ class MLXFlightServer(flight.FlightServerBase):
                 raise flight.FlightInvalidArgument("No data received")
 
             # Convert to NumPy and reshape
-            logger.debug(f"[{session_id}] Converting to NumPy array")
             np_array = np.frombuffer(full_bytes, dtype=np_dtype)
             np_array = np_array.reshape(shape)
 
             # Convert to MLX
-            logger.debug(f"[{session_id}] Converting to MLX tensor with dtype={dtype_str}")
             arrow_tensor = pa.Tensor.from_numpy(np_array)
             tensor = arrow_to_mlx(arrow_tensor, dtype_str)
 
@@ -139,14 +129,11 @@ class MLXFlightServer(flight.FlightServerBase):
                 raise flight.FlightInternalError("Model not loaded")
 
             if session_id not in self.caches:
-                logger.info(f"[{session_id}] Creating new cache for session")
                 reset_cache(session_id)
             cache_to_use = self.caches[session_id]
 
-            logger.info(f"[{session_id}] Processing tensor through model - shape={tensor.shape}, dtype={tensor.dtype}")
             try:
                 processed_tensor = self.model(tensor, cache=cache_to_use)
-                logger.info(f"[{session_id}] Model processing complete - output shape={processed_tensor.shape}")
             except Exception as model_error:
                 logger.error(f"[{session_id}] Model processing failed: {model_error}", exc_info=True)
                 raise
@@ -157,12 +144,8 @@ class MLXFlightServer(flight.FlightServerBase):
             self.cache_request_counts[session_id] += 1
             if self.cache_request_counts[session_id] % 256 == 0:
                 mx.clear_cache()
-                logger.debug(
-                    f"Cleared cache after {self.cache_request_counts[session_id]} requests for session {session_id}"
-                )
 
             # Prepare response: chunk if large
-            logger.info(f"[{session_id}] Preparing response - tensor shape={processed_tensor.shape}, dtype={processed_tensor.dtype}")
             arrow_processed, original_dtype = mlx_to_arrow(processed_tensor)
             np_processed = arrow_processed.to_numpy()
             total_size = np_processed.nbytes
@@ -171,15 +154,10 @@ class MLXFlightServer(flight.FlightServerBase):
             total_items = np_processed.size
             total_chunks_resp = (total_items + chunk_items - 1) // chunk_items
             
-            logger.info(f"[{session_id}] Response tensor: shape={np_processed.shape}, dtype={np_processed.dtype}, "
-                       f"nbytes={total_size}, itemsize={item_size}, total_chunks={total_chunks_resp}")
-            
             # Begin writer now that we're ready to send response
-            logger.info(f"[{session_id}] Beginning writer with schema")
             try:
                 writer.begin(resp_schema)
                 writer_begun = True
-                logger.info(f"[{session_id}] Writer begun successfully")
             except Exception as begin_error:
                 logger.error(f"[{session_id}] Failed to begin writer: {begin_error}", exc_info=True)
                 raise
@@ -198,10 +176,6 @@ class MLXFlightServer(flight.FlightServerBase):
                 "md5": hashlib.md5(flat_np.tobytes()).hexdigest(),
             }
             
-            logger.info(f"[{session_id}] Metadata: original_dtype={original_dtype}, "
-                       f"numpy_dtype={np_processed.dtype}, nbytes={flat_np.nbytes}")
-            
-            logger.info(f"[{session_id}] Sending metadata and chunk 0 (total_chunks={total_chunks_resp})")
             # First chunk (chunk 0) sent with metadata
             if total_chunks_resp > 0:
                 start = 0
@@ -212,18 +186,15 @@ class MLXFlightServer(flight.FlightServerBase):
                 meta_batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
                 try:
                     writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
-                    logger.info(f"[{session_id}] Successfully wrote metadata and chunk 0")
                 except Exception as write_error:
                     logger.error(f"[{session_id}] Failed to write metadata and chunk 0: {write_error}", exc_info=True)
                     raise
             else:
                 # Edge case: empty tensor
-                logger.warning(f"[{session_id}] Empty tensor response (total_chunks=0)")
                 meta_batch = pa.RecordBatch.from_arrays([pa.array([b""], type=pa.binary())], schema=resp_schema)
                 writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
 
             # Send remaining chunks (1 through N-1)
-            logger.debug(f"[{session_id}] Sending remaining {total_chunks_resp - 1} chunks")
             for i in range(1, total_chunks_resp):
                 start = i * chunk_items
                 end = min(start + chunk_items, total_items)
@@ -234,8 +205,6 @@ class MLXFlightServer(flight.FlightServerBase):
                 writer.write_with_metadata(
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
-
-            logger.info(f"[{session_id}] All response data written")
             
             # CRITICAL FIX for race condition:
             # In bidirectional streaming, if the server returns immediately after writing,
@@ -246,17 +215,13 @@ class MLXFlightServer(flight.FlightServerBase):
             # signal it has received all the data. This ensures the stream stays open
             # until the client is done reading.
             try:
-                logger.debug(f"[{session_id}] Waiting for client ACK...")
                 ack_batch, ack_meta = reader.read_chunk()
-                logger.info(f"[{session_id}] Received client ACK, closing stream")
             except StopIteration:
                 # Client closed their end, which is fine
-                logger.debug(f"[{session_id}] Client closed stream (no ACK needed)")
+                pass
             except Exception as ack_error:
                 # Don't fail if ACK fails - just log it
-                logger.warning(f"[{session_id}] Error waiting for ACK: {ack_error}")
-            
-            logger.info(f"[{session_id}] do_exchange completing. Stream will close on return.")
+                logger.debug(f"[{session_id}] Error waiting for ACK: {ack_error}")
 
         except Exception as e:
             logger.error(f"[{session_id}] Error in do_exchange: {e}", exc_info=True)
@@ -265,7 +230,6 @@ class MLXFlightServer(flight.FlightServerBase):
                 # If writer was already begun, we can't call begin() again
                 # But we can still try to write an error batch
                 if not writer_begun:
-                    logger.debug(f"[{session_id}] Beginning writer for error response")
                     writer.begin(resp_schema)
                 
                 error_meta = {
@@ -278,7 +242,6 @@ class MLXFlightServer(flight.FlightServerBase):
                 }
                 error_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=resp_schema)
                 writer.write_with_metadata(error_batch, json.dumps(error_meta).encode())
-                logger.info(f"[{session_id}] Error response sent, do_exchange will complete and close stream")
                 # Stream closes automatically when do_exchange returns
             except Exception as write_error:
                 logger.error(f"[{session_id}] Failed to send error response: {write_error}", exc_info=True)

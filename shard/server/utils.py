@@ -147,16 +147,12 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     total_chunks = (total_items + chunk_items - 1) // chunk_items
 
     descriptor = flight.FlightDescriptor.for_command("SendTensor")
-    logger.debug(f"[{session_id or 'default'}] Starting do_exchange")
     writer, reader = client.do_exchange(descriptor)
 
     # Flatten and compute checksum from the actual bytes we'll send
     flat_np = np_tensor.flatten()
     full_bytes = flat_np.tobytes()
     checksum = hashlib.md5(full_bytes).hexdigest()
-    
-    logger.debug(f"[{session_id or 'default'}] Sending tensor: shape={tensor.shape}, dtype={original_dtype}, "
-                 f"size={len(full_bytes)} bytes, chunks={total_chunks}, checksum={checksum}")
     
     # Send metadata in first write (no data)
     # IMPORTANT: Send original_dtype so receiver can reconstruct bfloat16
@@ -179,11 +175,9 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     else:
         meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
     
-    logger.debug(f"[{session_id or 'default'}] Sending metadata and chunk 0")
     writer.write_with_metadata(meta_batch, json.dumps(meta).encode())
 
     # Send remaining chunks (1 through total_chunks-1)
-    logger.debug(f"[{session_id or 'default'}] Sending {total_chunks - 1} remaining chunks")
     for i in range(1, total_chunks):
         start = i * chunk_items * item_size
         end = min(start + chunk_items * item_size, len(full_bytes))
@@ -192,9 +186,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         batch = pa.RecordBatch.from_arrays([chunk_array], schema=schema)
         writer.write_with_metadata(batch, json.dumps({"chunk_index": i}).encode())
 
-    logger.debug(f"[{session_id or 'default'}] All chunks sent, done writing")
     writer.done_writing()
-    logger.debug(f"[{session_id or 'default'}] Returning writer and reader for response")
     return writer, reader  # Return both so we can send ACK after reading
 
 
@@ -202,10 +194,8 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
     """Convert Flight response to MLX array."""
     try:
         # Read metadata batch
-        logger.debug("Reading response metadata from server")
         try:
             batch, meta = reader.read_chunk()
-            logger.debug(f"Received batch: {batch is not None}, meta: {meta is not None}")
         except StopIteration as e:
             logger.error(f"StopIteration when reading first chunk: {e}")
             raise ValueError("No data received from server - stream ended prematurely. The server may have crashed or encountered an error before sending a response.")
@@ -216,7 +206,6 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         if meta is None:
             raise ValueError("No metadata in response")
         meta_dict = json.loads(meta.to_pybytes())
-        logger.debug(f"Response metadata: {meta_dict}")
 
         if not meta_dict.get("success"):
             error_msg = meta_dict.get('message', 'Unknown error')
@@ -225,8 +214,6 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         total_chunks = meta_dict["total_chunks"]
         shape = tuple(meta_dict["shape"])
         dtype_str = meta_dict["dtype"]
-        
-        logger.debug(f"Response metadata: shape={shape}, dtype={dtype_str}, chunks={total_chunks}")
 
         dtype_map = {
             "mlx.core.float32": np.float32,
@@ -264,14 +251,11 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             expected_md5 = meta_dict["md5"]
             if received_md5 != expected_md5:
-                logger.error(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
                 raise ValueError(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
         
-        # Debug: Check if size matches
+        # Check if size matches
         expected_size = np.prod(shape) * np.dtype(np_dtype).itemsize
         actual_size = len(full_bytes)
-        logger.info(f"Tensor reconstruction: shape={shape}, dtype={dtype_str} (np.{np_dtype.__name__}), "
-                   f"expected_bytes={expected_size}, actual_bytes={actual_size}")
         
         if expected_size != actual_size:
             logger.error(f"Size mismatch! Expected {expected_size} bytes for shape {shape} with dtype {np_dtype}, "
@@ -286,7 +270,6 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         # Pass original dtype to reconstruct bfloat16 correctly
         result = arrow_to_mlx(arrow_tensor, dtype_str)
-        logger.info("Finished reading tensor response from server")
         return result
 
     except ValueError:
@@ -313,6 +296,7 @@ def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, back
                 logger.debug(f"[{session_id or 'default'}] Could not send ACK: {ack_error}")
             
             return result
+
         except flight.FlightInternalError as e:
             error_str = str(e)
             if "Checksum mismatch" in error_str:
@@ -534,9 +518,8 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
         session_id = str(uuid.uuid4())
         logger.info(f"Session ID: {session_id}")
         
-        for i, client in enumerate(flight_clients):
+        for client in flight_clients:
             client.do_action(flight.Action("ResetCache", json.dumps({"session_id": session_id}).encode()))
-            logger.debug(f"Peer {i} cache reset")
         
         pipeline_model = PipelineModel(flight_clients, session_id)
         
