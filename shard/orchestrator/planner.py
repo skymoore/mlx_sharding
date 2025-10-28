@@ -286,25 +286,49 @@ class ShardingPlanner:
         overhead_per_peer = activation_overhead_gb / len(self.peers)
 
         # Calculate how many layers each peer can handle
+        import math
         peer_layer_capacity = []
+        
+        logger.info("Per-peer layer capacity calculation:")
         for peer in self.peers:
             # Apply safety margin to each peer
             available = peer.ram_available_gb * (1 - self.safety_margin)
             # Reserve space for KV cache and overhead
             available_for_layers = available - kv_cache_per_peer - overhead_per_peer
-            # Calculate max layers (use floor to be conservative and avoid OOM)
-            import math
-
-            max_layers = max(1, math.floor(available_for_layers / layer_memory_gb))
+            # Calculate max layers
+            # Use round instead of floor to be less conservative when very close
+            max_layers_float = available_for_layers / layer_memory_gb
+            max_layers = max(1, round(max_layers_float))
             peer_layer_capacity.append(max_layers)
 
-            logger.debug(
-                f"Peer {peer.id[:8]}: {available:.1f}GB available, "
-                f"can handle ~{max_layers} layers"
+            logger.info(
+                f"  Peer {peer.id[:8]} ({peer.ram_available_gb:.1f}GB): "
+                f"{available:.1f}GB usable → {available_for_layers:.1f}GB for layers → "
+                f"{max_layers} layers ({max_layers_float:.2f} exact)"
             )
+        
+        logger.info(f"  Total capacity: {sum(peer_layer_capacity)} layers (need {self.total_layers})")
 
         # Validate we can fit the model
         if sum(peer_layer_capacity) < self.total_layers:
+            # If we're only 1-2 layers short, try reducing context slightly more
+            layers_short = self.total_layers - sum(peer_layer_capacity)
+            if layers_short <= 2 and self.context_length > 1024:
+                logger.warning(f"Short by {layers_short} layer(s), attempting further context reduction...")
+                # Reduce context by 10% and retry
+                new_context = int(self.context_length * 0.9 // 1024) * 1024
+                new_context = max(1024, new_context)
+                
+                logger.warning(f"Reducing context from {self.context_length:,} to {new_context:,} tokens")
+                self.context_length = new_context
+                
+                # Re-estimate and recurse (but only once to avoid infinite loop)
+                self.memory_estimates = SystemCapabilities.estimate_model_memory(
+                    self.model_path_or_repo, self.context_length
+                )
+                # Recalculate from the beginning
+                return self.calculate_sharding_plan()
+            
             raise InsufficientMemoryError(
                 f"Cannot fit {self.total_layers} layers across {len(self.peers)} peer(s). "
                 f"Total capacity: {sum(peer_layer_capacity)} layers. "
