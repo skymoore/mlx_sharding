@@ -98,7 +98,12 @@ app.add_middleware(
 @app.get("/health")
 async def health_check(request: Request):
     """Health check endpoint."""
-    return {"status": "ok", "setup_complete": request.app.state.setup_complete, "version": "2.0.0"}
+
+    return {
+        "status": "ok",
+        "setup_complete": request.app.state.setup_complete,
+        "version": "2.0.0",
+    }
 
 
 @app.get("/v1/setup/status")
@@ -167,26 +172,6 @@ async def chat_completions(
         # Prepare messages
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        # Add tool descriptions to system message if tools provided
-        if request.tools:
-            tool_prompt = model_provider.tool_manager.format_tools_for_prompt(
-                request.tools
-            )
-            # Find or create system message
-            system_msg_idx = next(
-                (i for i, m in enumerate(messages) if m["role"] == "system"), None
-            )
-            if system_msg_idx is not None:
-                messages[system_msg_idx]["content"] += tool_prompt
-            else:
-                messages.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": f"You are a helpful assistant.{tool_prompt}",
-                    },
-                )
-
         # Apply chat template using tokenizer's built-in support
         # The tokenizer handles system message compatibility automatically
         prompt = model_provider.tokenizer.apply_chat_template(
@@ -194,30 +179,6 @@ async def chat_completions(
             tokenize=True,
             add_generation_prompt=True,
         )
-
-        # 🔍 DEBUG: Log prompt details
-        logger.info("=" * 80)
-        logger.info("📝 PROMPT ENCODING")
-        logger.info("=" * 80)
-        logger.info(
-            f"Prompt token IDs: {prompt if len(prompt) < 100 else f'{prompt[:20]}...'}"
-        )
-        logger.info(f"Prompt length: {len(prompt)} tokens")
-        try:
-            decoded = model_provider.tokenizer.decode(prompt)
-            logger.info(f"Decoded prompt: {repr(decoded)}")
-        except:
-            pass
-
-        # 🔍 DEBUG: Check if EOS tokens are in prompt
-        if hasattr(model_provider.tokenizer, "eos_token_ids"):
-            for eos_id in model_provider.tokenizer.eos_token_ids:
-                if eos_id in prompt:
-                    positions = [i for i, t in enumerate(prompt) if t == eos_id]
-                    logger.warning(
-                        f"⚠️  EOS token {eos_id} found in prompt at positions: {positions}"
-                    )
-        logger.info("=" * 80)
 
         prompt_array = mx.array(prompt)
 
@@ -248,7 +209,11 @@ async def completions(
     model_provider = http_request.app.state.model_provider
 
     try:
-        prompt = model_provider.tokenizer.encode(request.prompt)
+        prompt = model_provider.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
         prompt_array = mx.array(prompt)
 
         if request.stream:
@@ -268,7 +233,6 @@ async def run_orchestrator_setup(
     model_path: str,
     grpc_port: int,
     http_port: int,
-    custom_chat_template: Optional[str] = None,
     resource_strategy: str = "fewest-nodes",
     context_length: int = 8192,
     safety_margin: float = 0.15,
@@ -279,7 +243,7 @@ async def run_orchestrator_setup(
     logger.info("🚀 MLX SHARDING V2 - ZERO-CONFIG SETUP (COORDINATOR-ONLY)")
     logger.info("=" * 80)
     logger.info("Note: API server does NOT load model layers")
-    logger.info("      Start peer processes separately with: mlx-shard-peer")
+    logger.info("      Start peer processes separately with: mlx-shard peer")
     logger.info("=" * 80)
 
     # Create orchestrator (coordinator-only mode - no local layers)
@@ -363,7 +327,9 @@ async def shutdown_coordinator():
 
     if app.state.orchestrator_instance and app.state.discovered_peers:
         try:
-            await app.state.orchestrator_instance.unclaim_peers(app.state.discovered_peers)
+            await app.state.orchestrator_instance.unclaim_peers(
+                app.state.discovered_peers
+            )
             logger.info("✓ Peers unclaimed successfully")
         except Exception as e:
             logger.error(f"Error unclaiming peers: {e}", exc_info=True)

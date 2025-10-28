@@ -1,8 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional, Union, List, Any, Dict
 
-from shard.api.tool_calling import ToolDefinition
-
 
 # Pydantic models for OpenAI API compatibility
 class Message(BaseModel):
@@ -21,7 +19,7 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     repetition_penalty: Optional[float] = 1.0
     repetition_context_size: Optional[int] = 20
-    tools: Optional[List[ToolDefinition]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
 

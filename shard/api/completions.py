@@ -6,7 +6,6 @@ import uuid
 import json
 import asyncio
 from logging import getLogger
-from shard.api.util import check_stop_sequences
 from shard.api.mlx_model_provider import MLXModelProvider
 
 log = getLogger(__name__)
@@ -19,17 +18,6 @@ async def generate_chat_completion(
     tokens = []
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-
-    # Prepare stop sequences (user-provided strings only)
-    stop_sequences = []
-    if request.stop:
-        if isinstance(request.stop, str):
-            stop_sequences = [request.stop]
-        else:
-            stop_sequences = request.stop
-
-    # Get stop token IDs from tokenizer (this is what mlx_lm uses)
-    stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
     start_time = time.time()
@@ -49,18 +37,7 @@ async def generate_chat_completion(
         tokens.append(token)
         detokenizer.add_token(token)
 
-        # Check for stop tokens by ID (faster and more reliable)
-        # Convert MLX array to Python int for comparison
-        token_id = int(token.item()) if hasattr(token, "item") else int(token)
-        if token_id in stop_token_ids:
-            log.debug(f"Stop token detected: {token_id} in {stop_token_ids}")
-            finish_reason = "stop"
-            break
-
-        # Also check for stop sequences in generated text (for multi-token stops)
-        current_text = detokenizer.text
-        stop_found, trimmed_text = check_stop_sequences(current_text, stop_sequences)
-        if stop_found:
+        if token == model_provider.tokenizer.eos_token_id:
             finish_reason = "stop"
             break
 
@@ -69,7 +46,7 @@ async def generate_chat_completion(
 
     generation_time = time.time() - start_time
     tokens_per_second = len(tokens) / generation_time if generation_time > 0 else 0
-    
+
     log.info("=" * 80)
     log.info(f"🏁 GENERATION COMPLETE")
     log.info(f"   Prompt tokens: {len(prompt)}")
@@ -82,15 +59,6 @@ async def generate_chat_completion(
     detokenizer.finalize()
     text = detokenizer.text
 
-    # Final check and trim stop sequences
-    _, text = check_stop_sequences(text, stop_sequences)
-
-    # Parse tool calls if tools were provided
-    cleaned_content = text
-    tool_calls = []
-    if request.tools:
-        cleaned_content, tool_calls = model_provider.tool_manager.parse(text)
-
     # Build response
     response = {
         "id": f"chatcmpl-{uuid.uuid4()}",
@@ -102,7 +70,7 @@ async def generate_chat_completion(
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": cleaned_content,
+                    "content": text,
                 },
                 "finish_reason": finish_reason,
             }
@@ -114,44 +82,17 @@ async def generate_chat_completion(
         },
     }
 
-    # Add tool_calls if any were found
-    if tool_calls:
-        response["choices"][0]["message"]["tool_calls"] = [
-            {"id": tc.id, "type": tc.type, "function": tc.function} for tc in tool_calls
-        ]
-        # When tool calls present, finish_reason should be "tool_calls"
-        response["choices"][0]["finish_reason"] = "tool_calls"
-
     return response
 
 
 async def stream_chat_completion(
     request: ChatCompletionRequest, model_provider: MLXModelProvider, prompt: mx.array
 ):
-    """Generate streaming chat completion with tool call support."""
-    import json
-    import asyncio
-
+    """Generate streaming chat completion."""
     request_id = f"chatcmpl-{uuid.uuid4()}"
     created = int(time.time())
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
-
-    # Create streaming parser if tools provided
-    streaming_parser = None
-    if request.tools:
-        streaming_parser = model_provider.tool_manager.create_streaming_parser()
-
-    # Prepare stop sequences (user-provided strings only)
-    stop_sequences = []
-    if request.stop:
-        if isinstance(request.stop, str):
-            stop_sequences = [request.stop]
-        else:
-            stop_sequences = request.stop
-
-    # Get stop token IDs from tokenizer (this is what mlx_lm uses)
-    stop_token_ids = model_provider.get_stop_token_ids()
 
     finish_reason = "length"
     token_count = 0
@@ -173,171 +114,42 @@ async def stream_chat_completion(
             token_count += 1
             detokenizer.add_token(token)
 
-            # Check for stop tokens by ID (faster and more reliable)
-            # Convert MLX array to Python int for comparison
-            token_id = int(token.item()) if hasattr(token, "item") else int(token)
-            if token_id in stop_token_ids:
-                finish_reason = "stop"
-                break
-
-            # Also check for stop sequences in full text (for multi-token stops)
-            current_text = detokenizer.text
-            stop_found, trimmed_text = check_stop_sequences(
-                current_text, stop_sequences
-            )
-            if stop_found:
+            if token == model_provider.tokenizer.eos_token_id:
                 finish_reason = "stop"
                 break
 
             # Get the segment to send
             text = detokenizer.last_segment
 
-            # 🔥 NEW: Periodic cache clearing to prevent memory accumulation
+            # Periodic cache clearing to prevent memory accumulation
             if n % 256 == 0:
                 mx.clear_cache()
 
-            # Check if this segment contains a stop sequence
             if text:
-                segment_stop_found, trimmed_segment = check_stop_sequences(
-                    text, stop_sequences
-                )
-                if segment_stop_found:
-                    finish_reason = "stop"
-                    text = trimmed_segment
-
-                # Parse for tool calls if enabled
-                if streaming_parser and text:
-                    content_to_emit, new_tool_calls = streaming_parser.add_chunk(text)
-
-                    # Emit content chunk if any
-                    if content_to_emit:
-                        chunk = {
-                            "id": request_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": request.model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {"content": content_to_emit},
-                                    "finish_reason": None,
-                                }
-                            ],
+                # Send text directly
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": text},
+                            "finish_reason": None,
                         }
-                        yield f"data: {json.dumps(chunk)}\n\n"
-
-                    # Emit tool call chunks if any
-                    for tool_call in new_tool_calls:
-                        chunk = {
-                            "id": request_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": request.model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "tool_calls": [
-                                            {
-                                                "index": 0,
-                                                "id": tool_call.id,
-                                                "type": "function",
-                                                "function": {
-                                                    "name": tool_call.function["name"],
-                                                    "arguments": tool_call.function[
-                                                        "arguments"
-                                                    ],
-                                                },
-                                            }
-                                        ]
-                                    },
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                elif text:
-                    # No tool parsing, send text directly
-                    chunk = {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": request.model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": text},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    ],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
 
                 await asyncio.sleep(0.001)  # Small delay to prevent socket overflow
-
-                if segment_stop_found:
-                    break
-
-        # Finalize - get any remaining content
-        if streaming_parser:
-            remaining_content, remaining_tool_calls = streaming_parser.finalize()
-
-            if remaining_content:
-                chunk = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": remaining_content},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-
-            for tool_call in remaining_tool_calls:
-                chunk = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": 0,
-                                        "id": tool_call.id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_call.function["name"],
-                                            "arguments": tool_call.function[
-                                                "arguments"
-                                            ],
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-
-            # Update finish_reason if tool calls were emitted
-            if streaming_parser.emitted_tool_calls:
-                finish_reason = "tool_calls"
 
         # Log generation statistics
         generation_time = time.time() - start_time
         tokens_per_second = token_count / generation_time if generation_time > 0 else 0
-        
+
         log.info("=" * 80)
-        log.info(f"🏁 GENERATION COMPLETE")
+        log.info("GENERATION COMPLETE")
         log.info(f"   Prompt tokens: {len(prompt)}")
         log.info(f"   Completion tokens: {token_count}")
         log.info(f"   Total tokens: {len(prompt) + token_count}")
@@ -405,9 +217,9 @@ async def generate_completion(
 
     generation_time = time.time() - start_time
     tokens_per_second = len(tokens) / generation_time if generation_time > 0 else 0
-    
+
     log.info("=" * 80)
-    log.info(f"🏁 GENERATION COMPLETE")
+    log.info("GENERATION COMPLETE")
     log.info(f"   Prompt tokens: {len(prompt)}")
     log.info(f"   Completion tokens: {len(tokens)}")
     log.info(f"   Total tokens: {len(prompt) + len(tokens)}")
@@ -489,7 +301,7 @@ async def stream_completion(
         # Log generation statistics
         generation_time = time.time() - start_time
         tokens_per_second = token_count / generation_time if generation_time > 0 else 0
-        
+
         log.info("=" * 80)
         log.info(f"🏁 GENERATION COMPLETE")
         log.info(f"   Prompt tokens: {len(prompt)}")

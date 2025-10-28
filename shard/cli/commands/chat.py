@@ -47,7 +47,7 @@ from typing import Optional
 @click.option(
     "--top-k",
     type=int,
-    default=None,
+    default=40,
     help="Top-k sampling parameter",
     show_default=True,
 )

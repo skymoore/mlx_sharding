@@ -147,6 +147,17 @@ class PeerServer:
 
             old_coordinator = self.coordinator_id
             self.coordinator_id = None
+            
+            # Automatically unload model when unclaimed
+            if self.model is not None:
+                logger.info("Unloading model due to unclaim")
+                self.model = None
+                self.tokenizer = None
+                self.model_config = None
+                self.assignment = None
+                self.state = "idle"
+                self.discovery.update_status("idle", model_loaded="", layers_loaded="")
+            
             logger.info(
                 f"Unclaimed from coordinator {old_coordinator[:8] if old_coordinator else 'none'}"
             )

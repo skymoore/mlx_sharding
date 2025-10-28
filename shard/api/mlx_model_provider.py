@@ -4,7 +4,6 @@ from pathlib import Path
 from mlx_lm.tokenizer_utils import load_tokenizer
 from mlx_lm.utils import hf_repo_to_path
 from logging import getLogger
-from shard.api.tool_calling import create_tool_call_manager
 from shard.server.utils import (
     create_coordinator_generate_step,
     load_model,
@@ -86,13 +85,8 @@ class MLXModelProvider:
         )
         self.created = int(time.time())
 
-        # Initialize tool call manager
-        self.tool_manager = create_tool_call_manager(self.model_type)
         log.info(f"✓ Model provider initialized: {self.model_name}")
         log.info(f"✓ Model type: {self.model_type}")
-        log.info(
-            f"✓ Tool calling enabled with {self.tool_manager.parser.__class__.__name__}"
-        )
 
         # Chat templates are handled by the tokenizer's built-in apply_chat_template()
         log.info(
