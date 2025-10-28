@@ -17,6 +17,24 @@ from pyarrow import flight
 # Setup logger for this module
 logger = logging.getLogger(__name__)
 
+
+def filter_none_kwargs(kwargs: dict) -> dict:
+    """
+    Filter out None values from kwargs dictionary.
+    
+    This is useful when calling functions that have default values but don't
+    accept None as an explicit value (e.g., make_sampler expects int for top_k,
+    not None).
+    
+    Args:
+        kwargs: Dictionary of keyword arguments
+        
+    Returns:
+        New dictionary with None values removed
+    """
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
 # Configuration
 # Reduced from 10MB to 2MB to avoid gRPC "Message too long" errors
 CHUNK_SIZE_MB = 2
@@ -562,6 +580,7 @@ def create_coordinator_generate_step(
 
         pipeline_model = PipelineModel(flight_clients, session_id)
 
+        # Note: make_logits_processors handles None internally, so no filter is needed
         logits_processors = make_logits_processors(
             logit_bias=logit_bias,
             repetition_penalty=repetition_penalty,
@@ -573,7 +592,14 @@ def create_coordinator_generate_step(
         else:
             from mlx_lm.sample_utils import make_sampler
 
-            sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k)
+            # Filter None values to allow MLX library defaults to be used
+            # make_sampler expects concrete types (e.g., int for top_k), not None
+            sampler_kwargs = filter_none_kwargs({
+                "temp": temp,
+                "top_p": top_p,
+                "top_k": top_k,
+            })
+            sampler = make_sampler(**sampler_kwargs)
 
         token_count = 0
         start_time = time.time()
