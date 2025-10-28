@@ -83,7 +83,11 @@ class SystemCapabilities:
             num_layers = config.get("num_hidden_layers", 32)
             hidden_size = config.get("hidden_size", 4096)
             num_attention_heads = config.get("num_attention_heads", 32)
+            # Support for GQA/MQA: use num_key_value_heads if available
+            num_key_value_heads = config.get("num_key_value_heads", num_attention_heads)
             vocab_size = config.get("vocab_size", 32000)
+            # Get head_dim from config if available, otherwise calculate
+            head_dim = config.get("head_dim", hidden_size // num_attention_heads)
             
             # Get actual model file size (most reliable method)
             total_file_size = 0
@@ -108,16 +112,17 @@ class SystemCapabilities:
                 bits = 16  # Default assumption
             
             logger.info(f"Model file size: {weights_gb:.1f}GB ({bits}-bit quantization)")
+            logger.info(f"Model architecture: {num_layers} layers, {num_attention_heads} attn heads, {num_key_value_heads} KV heads")
             
             # KV cache estimation
-            # KV cache per layer: 2 (K and V) * batch_size * num_heads * seq_len * head_dim
-            head_dim = hidden_size // num_attention_heads
+            # KV cache per layer: 2 (K and V) * batch_size * num_kv_heads * seq_len * head_dim
+            # Use num_key_value_heads for GQA/MQA support (e.g., Llama 3, GLM-4)
             batch_size = 1  # Assume batch size of 1
             kv_cache_elements = (
                 2 *  # K and V
                 batch_size *
                 num_layers *
-                num_attention_heads *
+                num_key_value_heads *  # Use KV heads, not attention heads!
                 context_length *
                 head_dim
             )
@@ -131,16 +136,25 @@ class SystemCapabilities:
                 "weights_gb": round(weights_gb, 2),
                 "num_layers": num_layers,
                 "hidden_size": hidden_size,
+                "num_attention_heads": num_attention_heads,
+                "num_key_value_heads": num_key_value_heads,
+                "head_dim": head_dim,
                 "vocab_size": vocab_size,
                 "quantization_bits": bits,
             }
             
-            # Add context-specific estimates
-            for ctx_len in [4096, 8192, 16384, 32768]:
+            # Add context-specific estimates for common lengths
+            for ctx_len in [4096, 8192, 16384, 32768, 65536, 131072]:
+                # Scale KV cache proportionally to context length
                 kv_gb = (kv_cache_elements * ctx_len / context_length * 2) / (1024**3)
                 total_gb = weights_gb + kv_gb + activation_overhead_gb
                 estimates[f"kv_cache_{ctx_len//1024}k_gb"] = round(kv_gb, 2)
                 estimates[f"total_{ctx_len//1024}k_gb"] = round(total_gb, 2)
+            
+            # Always add the requested context length estimate
+            kv_gb_requested = (kv_cache_elements * 2) / (1024**3)
+            estimates[f"kv_cache_{context_length//1024}k_gb"] = round(kv_gb_requested, 2)
+            estimates[f"total_{context_length//1024}k_gb"] = round(weights_gb + kv_gb_requested + activation_overhead_gb, 2)
             
             estimates["activation_overhead_gb"] = round(activation_overhead_gb, 2)
             
@@ -161,7 +175,7 @@ class SystemCapabilities:
         kv_cache_gb = context_length / 8192 * 2.0  # Scale with context length
         activation_gb = 2.0
         
-        return {
+        estimates = {
             "weights_gb": weights_gb,
             "num_layers": 32,
             "hidden_size": 4096,
@@ -171,9 +185,19 @@ class SystemCapabilities:
             "kv_cache_8k_gb": 2.0,
             "kv_cache_16k_gb": 4.0,
             "kv_cache_32k_gb": 8.0,
+            "kv_cache_64k_gb": 16.0,
+            "kv_cache_128k_gb": 32.0,
             "total_4k_gb": weights_gb + 1.0 + activation_gb,
             "total_8k_gb": weights_gb + 2.0 + activation_gb,
             "total_16k_gb": weights_gb + 4.0 + activation_gb,
             "total_32k_gb": weights_gb + 8.0 + activation_gb,
+            "total_64k_gb": weights_gb + 16.0 + activation_gb,
+            "total_128k_gb": weights_gb + 32.0 + activation_gb,
             "activation_overhead_gb": activation_gb,
         }
+        
+        # Add the requested context length estimate
+        estimates[f"kv_cache_{context_length//1024}k_gb"] = round(kv_cache_gb, 2)
+        estimates[f"total_{context_length//1024}k_gb"] = round(weights_gb + kv_cache_gb + activation_gb, 2)
+        
+        return estimates
