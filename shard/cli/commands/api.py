@@ -59,7 +59,14 @@ import uvicorn
     help="Resource allocation strategy: 'fewest-nodes' uses minimum peers needed, 'proportionally' distributes across all peers by RAM proportion",
     show_default=True,
 )
-def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, chat_template_string, resource_strategy):
+@click.option(
+    "--context-length",
+    type=int,
+    default=8192,
+    help="Context window size for KV cache estimation",
+    show_default=True,
+)
+def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, chat_template_string, resource_strategy, context_length):
     """Start the MLX Sharding API server (coordinator-only mode)."""
     from shard.api.fastapi import (
         app,
@@ -106,6 +113,7 @@ def api(model, grpc_port, http_port, log_level, cache_limit_gb, chat_template, c
                 http_port=http_port,
                 custom_chat_template=custom_template,
                 resource_strategy=resource_strategy,
+                context_length=context_length,
             )
         except Exception as e:
             logging.error(f"Fatal setup error: {e}")

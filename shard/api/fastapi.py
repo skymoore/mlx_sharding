@@ -270,6 +270,7 @@ async def run_orchestrator_setup(
     http_port: int,
     custom_chat_template: Optional[str] = None,
     resource_strategy: str = "fewest-nodes",
+    context_length: int = 8192,
 ) -> Dict[str, Any]:
     """Run the orchestrator setup process (coordinator-only, no local layers)."""
 
@@ -286,6 +287,7 @@ async def run_orchestrator_setup(
         grpc_port=grpc_port,
         http_port=http_port,
         resource_strategy=resource_strategy,
+        context_length=context_length,
     )
 
     # Store orchestrator in app state for cleanup
