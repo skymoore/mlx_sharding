@@ -184,6 +184,7 @@ async def chat_completions(
         # The tokenizer handles system message compatibility automatically
         prompt = model_provider.tokenizer.apply_chat_template(
             messages,
+            tools=request.tools,  # Pass tools to the template
             tokenize=True,
             add_generation_prompt=True,
         )

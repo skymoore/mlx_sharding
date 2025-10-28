@@ -7,6 +7,7 @@ import json
 import asyncio
 from logging import getLogger
 from shard.api.mlx_model_provider import MLXModelProvider
+from shard.api.tool_parsing import parse_glm4_tool_calls
 
 log = getLogger(__name__)
 
@@ -113,6 +114,33 @@ async def generate_chat_completion(
             if eos_str in text:
                 text = text.split(eos_str)[0]
 
+    # Parse tool calls if tools were provided
+    message = {"role": "assistant", "content": text}
+    
+    if request.tools:
+        # Only parse tool calls for GLM-4 models
+        model_type = getattr(model_provider, "model_type", "unknown")
+        if model_type in ("chatglm", "glm4_moe"):
+            parsed = parse_glm4_tool_calls(text, request.tools)
+            
+            # Update message with parsed content
+            if "reasoning_content" in parsed:
+                message["reasoning_content"] = parsed["reasoning_content"]
+            
+            if "content" in parsed:
+                message["content"] = parsed["content"]
+            else:
+                message["content"] = None
+            
+            if "tool_calls" in parsed:
+                message["tool_calls"] = parsed["tool_calls"]
+                # When tool calls are present, finish_reason should be "tool_calls"
+                finish_reason = "tool_calls"
+        else:
+            # For other models, assume they return tool calls in a standard format
+            # or implement additional parsers as needed
+            log.warning(f"Tool calling not yet implemented for model_type: {model_type}")
+
     # Build response
     response = {
         "id": f"chatcmpl-{uuid.uuid4()}",
@@ -122,10 +150,7 @@ async def generate_chat_completion(
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": text,
-                },
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],
@@ -228,6 +253,36 @@ async def stream_chat_completion(
         log.info(f"   Generation time: {generation_time:.2f}s")
         log.info(f"   Tokens/second: {tokens_per_second:.2f}")
         log.info("=" * 80)
+
+        # Parse tool calls if tools were provided
+        if request.tools:
+            # Only parse tool calls for GLM-4 models
+            model_type = getattr(model_provider, "model_type", "unknown")
+            if model_type in ("chatglm", "glm4_moe"):
+                detokenizer.finalize()
+                full_text = detokenizer.text
+                parsed = parse_glm4_tool_calls(full_text, request.tools)
+                
+                # If tool calls were found, send them
+                if "tool_calls" in parsed:
+                    finish_reason = "tool_calls"
+                    for tool_call in parsed["tool_calls"]:
+                        tool_chunk = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"tool_calls": [tool_call]},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(tool_chunk)}\n\n"
+            else:
+                log.warning(f"Tool calling not yet implemented for model_type: {model_type}")
 
         # Send final chunk
         final_chunk = {
