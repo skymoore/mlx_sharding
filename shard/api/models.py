@@ -15,6 +15,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[Message]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
     max_tokens: Optional[int] = 2048
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
@@ -29,6 +30,7 @@ class CompletionRequest(BaseModel):
     prompt: str
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
     max_tokens: Optional[int] = 2048
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None

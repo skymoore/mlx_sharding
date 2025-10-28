@@ -505,6 +505,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
         repetition_penalty: Optional[float] = None,
         repetition_context_size: Optional[int] = 20,
         top_p: float = 1.0,
+        top_k: Optional[int] = None,
         logit_bias: Optional[Dict[int, float]] = None,
         max_tokens: int = 256,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
@@ -517,6 +518,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
         logger.info(f"Max tokens: {max_tokens}")
         logger.info(f"Temperature: {temp}")
         logger.info(f"Top-p: {top_p}")
+        logger.info(f"Top-k: {top_k}")
         logger.info(f"Repetition penalty: {repetition_penalty}")
         
         if hasattr(tokenizer, 'eos_token_ids'):
@@ -548,7 +550,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
             sampler = lambda x: mx.argmax(x, axis=-1)
         else:
             from mlx_lm.sample_utils import make_sampler
-            sampler = make_sampler(temp=temp, top_p=top_p)
+            sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k)
         
         token_count = 0
         
@@ -571,7 +573,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
             
             if hasattr(tokenizer, 'eos_token_ids') and response.token in tokenizer.eos_token_ids:
                 logger.info(f"🛑 EOS token detected at position {token_count}: {response.token}")
-                logger.info(f"   This will cause stream_generate to stop")
+                logger.info("   This will cause stream_generate to stop")
 
             yield response.token, response.logprobs
 
@@ -618,5 +620,6 @@ def arrow_to_mlx(arrow_tensor: pa.Tensor, original_dtype: str = None) -> mx.arra
     # If original dtype was bfloat16, view the uint16 data back as bfloat16
     if original_dtype == "mlx.core.bfloat16":
         mlx_array = mlx_array.view(mx.bfloat16)
-    
+
     return mlx_array
+

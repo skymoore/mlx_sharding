@@ -45,6 +45,13 @@ from typing import Optional
     show_default=True,
 )
 @click.option(
+    "--top-k",
+    type=int,
+    default=None,
+    help="Top-k sampling parameter",
+    show_default=True,
+)
+@click.option(
     "--stream/--no-stream",
     default=True,
     help="Stream the response",
@@ -81,6 +88,7 @@ def chat(
     max_tokens: int,
     temperature: float,
     top_p: float,
+    top_k: Optional[int],
     stream: bool,
     system: Optional[str],
     api_key: Optional[str],
@@ -149,6 +157,8 @@ def chat(
         "top_p": top_p,
         "stream": stream,
     }
+    if top_k is not None:
+        request_data["top_k"] = top_k
 
     # Set up headers
     headers = {"Content-Type": "application/json"}

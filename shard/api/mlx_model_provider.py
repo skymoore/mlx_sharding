@@ -152,6 +152,7 @@ class MLXModelProvider:
                     prompt=prompt,
                     temp=kwargs.get("temperature", 0.7),
                     top_p=kwargs.get("top_p", 1.0),
+                    top_k=kwargs.get("top_k"),
                     repetition_penalty=kwargs.get("repetition_penalty", 1.0),
                     repetition_context_size=kwargs.get("repetition_context_size", 20),
                     max_tokens=kwargs.get("max_tokens", 256),
