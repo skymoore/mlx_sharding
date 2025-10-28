@@ -10,20 +10,21 @@ This is a lightweight worker node that:
 
 import logging
 import threading
+import gc
 from pathlib import Path
 from typing import Optional, Dict
 from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, File, Form, Request
 import uvicorn
+import mlx.core as mx
 
 from shard.zeroconf.discovery import PeerDiscovery
 from shard.zeroconf.capabilities import SystemCapabilities
 from shard.server.server import serve as flight_serve  # Updated to Flight
 from shard.server.utils import load_model
 from mlx_lm.tokenizer_utils import load_tokenizer
-import gc
-import mlx.core as mx
+import shard.server.server as flight_server_module
 
 # Setup logging
 logging.basicConfig(
@@ -158,6 +159,13 @@ class PeerServer:
                 self.assignment = None
                 self.state = "idle"
                 self.discovery.update_status("idle", model_loaded="", layers_loaded="")
+
+                # Clear the Flight server's global MODEL reference
+                # This is critical - the Flight server holds a global reference
+                flight_server_module.MODEL = None
+                flight_server_module.CACHES.clear()
+                flight_server_module.CACHE_REQUEST_COUNTS.clear()
+                logger.info("✓ Flight server global MODEL cleared")
 
                 # Force garbage collection and clear MLX cache
                 gc.collect()
@@ -432,10 +440,13 @@ class PeerServer:
 
             self.discovery.update_status("idle", model_loaded="", layers_loaded="")
 
-            # Force garbage collection and clear MLX cache
-            import gc
-            import mlx.core as mx
+            # Clear the Flight server's global MODEL reference
+            flight_server_module.MODEL = None
+            flight_server_module.CACHES.clear()
+            flight_server_module.CACHE_REQUEST_COUNTS.clear()
+            logger.info("✓ Flight server global MODEL cleared")
 
+            # Force garbage collection and clear MLX cache
             gc.collect()
             mx.clear_cache()
             logger.info("✓ Model unloaded and memory freed")
