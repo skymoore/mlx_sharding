@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 def filter_none_kwargs(kwargs: dict) -> dict:
     """
     Filter out None values from kwargs dictionary.
-    
+
     This is useful when calling functions that have default values but don't
     accept None as an explicit value (e.g., make_sampler expects int for top_k,
     not None).
-    
+
     Args:
         kwargs: Dictionary of keyword arguments
-        
+
     Returns:
         New dictionary with None values removed
     """
@@ -594,11 +594,13 @@ def create_coordinator_generate_step(
 
             # Filter None values to allow MLX library defaults to be used
             # make_sampler expects concrete types (e.g., int for top_k), not None
-            sampler_kwargs = filter_none_kwargs({
-                "temp": temp,
-                "top_p": top_p,
-                "top_k": top_k,
-            })
+            sampler_kwargs = filter_none_kwargs(
+                {
+                    "temp": temp,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                }
+            )
             sampler = make_sampler(**sampler_kwargs)
 
         token_count = 0

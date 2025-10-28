@@ -42,11 +42,11 @@ async def generate_chat_completion(
 
     # Get all EOS token IDs
     eos_token_ids = set()
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         eos_token_ids = set(model_provider.tokenizer.eos_token_ids)
     elif model_provider.tokenizer.eos_token_id is not None:
         eos_token_ids = {model_provider.tokenizer.eos_token_id}
-    
+
     for (token, _), n in zip(
         model_provider.generate(
             prompt,
@@ -63,7 +63,7 @@ async def generate_chat_completion(
         if token in eos_token_ids:
             finish_reason = "stop"
             break
-        
+
         tokens.append(token)
         detokenizer.add_token(token)
 
@@ -100,14 +100,14 @@ async def generate_chat_completion(
             if stop_seq in text:
                 text = text.split(stop_seq)[0]
                 break
-    
+
     # Also trim EOS tokens that may have been decoded into text
     eos_token = model_provider.tokenizer.eos_token
     if eos_token and eos_token in text:
         text = text.split(eos_token)[0]
-    
+
     # Trim any additional EOS tokens from the tokenizer
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         for eos_id in model_provider.tokenizer.eos_token_ids:
             eos_str = model_provider.tokenizer.decode([eos_id])
             if eos_str in text:
@@ -152,10 +152,10 @@ async def stream_chat_completion(
     token_count = 0
     start_time = time.time()
     stop_sequences = normalize_stop_sequences(request.stop)
-    
+
     # Get all EOS token IDs
     eos_token_ids = set()
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         eos_token_ids = set(model_provider.tokenizer.eos_token_ids)
     elif model_provider.tokenizer.eos_token_id is not None:
         eos_token_ids = {model_provider.tokenizer.eos_token_id}
@@ -177,7 +177,7 @@ async def stream_chat_completion(
             if token in eos_token_ids:
                 finish_reason = "stop"
                 break
-            
+
             token_count += 1
             detokenizer.add_token(token)
 
@@ -271,10 +271,10 @@ async def generate_completion(
     start_time = time.time()
     finish_reason = "length"
     stop_sequences = normalize_stop_sequences(request.stop)
-    
+
     # Get all EOS token IDs
     eos_token_ids = set()
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         eos_token_ids = set(model_provider.tokenizer.eos_token_ids)
     elif model_provider.tokenizer.eos_token_id is not None:
         eos_token_ids = {model_provider.tokenizer.eos_token_id}
@@ -294,7 +294,7 @@ async def generate_completion(
         if token in eos_token_ids:
             finish_reason = "stop"
             break
-        
+
         tokens.append(token)
         detokenizer.add_token(token)
 
@@ -328,14 +328,14 @@ async def generate_completion(
             if stop_seq in text:
                 text = text.split(stop_seq)[0]
                 break
-    
+
     # Also trim EOS tokens that may have been decoded into text
     eos_token = model_provider.tokenizer.eos_token
     if eos_token and eos_token in text:
         text = text.split(eos_token)[0]
-    
+
     # Trim any additional EOS tokens from the tokenizer
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         for eos_id in model_provider.tokenizer.eos_token_ids:
             eos_str = model_provider.tokenizer.decode([eos_id])
             if eos_str in text:
@@ -373,10 +373,10 @@ async def stream_completion(
     start_time = time.time()
     finish_reason = "length"
     stop_sequences = normalize_stop_sequences(request.stop)
-    
+
     # Get all EOS token IDs
     eos_token_ids = set()
-    if hasattr(model_provider.tokenizer, 'eos_token_ids'):
+    if hasattr(model_provider.tokenizer, "eos_token_ids"):
         eos_token_ids = set(model_provider.tokenizer.eos_token_ids)
     elif model_provider.tokenizer.eos_token_id is not None:
         eos_token_ids = {model_provider.tokenizer.eos_token_id}
@@ -397,7 +397,7 @@ async def stream_completion(
             if token in eos_token_ids:
                 finish_reason = "stop"
                 break
-            
+
             token_count += 1
             detokenizer.add_token(token)
 

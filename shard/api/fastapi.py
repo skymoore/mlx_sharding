@@ -23,6 +23,8 @@ from shard.api.models import (
     ModelInfo,
     ChatCompletionRequest,
     CompletionRequest,
+    GenerationDefaults,
+    apply_generation_defaults,
 )
 from shard.api.mlx_model_provider import MLXModelProvider
 from shard.api.completions import (
@@ -47,6 +49,7 @@ app.state.setup_complete = False
 app.state.setup_info = {}
 app.state.orchestrator_instance = None
 app.state.discovered_peers = []
+app.state.generation_defaults = GenerationDefaults()  # Will be overridden at startup
 
 # Security
 security = HTTPBearer(auto_error=False)
@@ -168,6 +171,11 @@ async def chat_completions(
 
     model_provider = http_request.app.state.model_provider
 
+    # Apply server-configured defaults to any None values
+    request = apply_generation_defaults(
+        request, http_request.app.state.generation_defaults
+    )
+
     try:
         # Prepare messages
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
@@ -207,6 +215,11 @@ async def completions(
         raise HTTPException(status_code=503, detail="Setup not complete")
 
     model_provider = http_request.app.state.model_provider
+
+    # Apply server-configured defaults to any None values
+    request = apply_generation_defaults(
+        request, http_request.app.state.generation_defaults
+    )
 
     try:
         prompt = model_provider.tokenizer.encode(request.prompt)

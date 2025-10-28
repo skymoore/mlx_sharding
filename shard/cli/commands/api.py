@@ -74,6 +74,47 @@ import uvicorn
     help="Memory safety margin as fraction (0.15 = 15%)",
     show_default=True,
 )
+@click.option(
+    "--default-temperature",
+    type=float,
+    default=0.7,
+    help="Default temperature for generation when not specified in request",
+    show_default=True,
+)
+@click.option(
+    "--default-top-p",
+    type=float,
+    default=1.0,
+    help="Default top_p for generation when not specified in request",
+    show_default=True,
+)
+@click.option(
+    "--default-top-k",
+    type=int,
+    default=None,
+    help="Default top_k for generation when not specified in request",
+)
+@click.option(
+    "--default-max-tokens",
+    type=int,
+    default=2048,
+    help="Default max_tokens for generation when not specified in request",
+    show_default=True,
+)
+@click.option(
+    "--default-repetition-penalty",
+    type=float,
+    default=1.0,
+    help="Default repetition_penalty for generation when not specified in request",
+    show_default=True,
+)
+@click.option(
+    "--default-repetition-context-size",
+    type=int,
+    default=20,
+    help="Default repetition_context_size for generation when not specified in request",
+    show_default=True,
+)
 def api(
     model,
     grpc_port,
@@ -85,6 +126,12 @@ def api(
     resource_strategy,
     context_length,
     safety_margin,
+    default_temperature,
+    default_top_p,
+    default_top_k,
+    default_max_tokens,
+    default_repetition_penalty,
+    default_repetition_context_size,
 ):
     """Start the MLX Sharding API server (coordinator-only mode)."""
     from shard.api.fastapi import (
@@ -93,6 +140,7 @@ def api(
         shutdown_coordinator,
     )
     from shard.api.util import load_api_keys
+    from shard.api.models import GenerationDefaults
 
     # Setup logging
     logging.basicConfig(
@@ -103,6 +151,23 @@ def api(
     # Set cache limit
     if cache_limit_gb:
         mx.metal.set_cache_limit(cache_limit_gb * 1024 * 1024 * 1024)
+
+    # Configure generation defaults
+    app.state.generation_defaults = GenerationDefaults(
+        temperature=default_temperature,
+        top_p=default_top_p,
+        top_k=default_top_k,
+        max_tokens=default_max_tokens,
+        repetition_penalty=default_repetition_penalty,
+        repetition_context_size=default_repetition_context_size,
+    )
+    logging.info("✓ Generation defaults configured:")
+    logging.info(f"  temperature: {default_temperature}")
+    logging.info(f"  top_p: {default_top_p}")
+    logging.info(f"  top_k: {default_top_k}")
+    logging.info(f"  max_tokens: {default_max_tokens}")
+    logging.info(f"  repetition_penalty: {default_repetition_penalty}")
+    logging.info(f"  repetition_context_size: {default_repetition_context_size}")
 
     # Load API keys into app state
     api_keys = load_api_keys()
