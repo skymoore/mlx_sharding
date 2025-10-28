@@ -27,7 +27,8 @@ from mlx_lm.tokenizer_utils import load_tokenizer
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,7 @@ class PeerServer:
 
             old_coordinator = self.coordinator_id
             self.coordinator_id = None
-            
+
             # Automatically unload model when unclaimed
             if self.model is not None:
                 logger.info("Unloading model due to unclaim")
@@ -157,7 +158,7 @@ class PeerServer:
                 self.assignment = None
                 self.state = "idle"
                 self.discovery.update_status("idle", model_loaded="", layers_loaded="")
-            
+
             logger.info(
                 f"Unclaimed from coordinator {old_coordinator[:8] if old_coordinator else 'none'}"
             )
@@ -377,14 +378,16 @@ class PeerServer:
                 self.model, self.model_config = load_model(
                     str(model_path), start_layer=start_layer, end_layer=end_layer
                 )
-                
+
                 # Load tokenizer for chat template support and debugging
                 logger.info(f"Loading tokenizer from {model_path}")
                 self.tokenizer = load_tokenizer(
                     model_path,
-                    eos_token_ids=self.model_config.get("eos_token_id", None)
+                    eos_token_ids=self.model_config.get("eos_token_id", None),
                 )
-                logger.info(f"✓ Tokenizer loaded with chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}")
+                logger.info(
+                    f"✓ Tokenizer loaded with chat template support: {hasattr(self.tokenizer, 'chat_template') and self.tokenizer.chat_template is not None}"
+                )
 
                 # Start Flight server now that model is loaded
                 if self.flight_thread is None:

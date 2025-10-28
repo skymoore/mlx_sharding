@@ -8,10 +8,12 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.models.deepseek_v2 import ModelArgs, DeepseekV2DecoderLayer
 from .base import IdentityBlock
 
+
 @dataclass
 class ModelArgs(ModelArgs):
     start_layer: int = 0
     end_layer: int = 27
+
 
 class DeepseekV2Model(nn.Module):
     def __init__(self, config: ModelArgs):
@@ -21,8 +23,7 @@ class DeepseekV2Model(nn.Module):
         self.end_layer = config.end_layer
         self.vocab_size = config.vocab_size
         if self.start_layer == 0:
-            self.embed_tokens = nn.Embedding(
-                config.vocab_size, config.hidden_size)
+            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
 
         self.layers = []
         for i in range(self.num_hidden_layers):
@@ -70,8 +71,7 @@ class Model(nn.Module):
         self.end_layer = config.end_layer
         self.model = DeepseekV2Model(config)
         if self.end_layer == self.args.num_hidden_layers:
-            self.lm_head = nn.Linear(
-                config.hidden_size, config.vocab_size, bias=False)
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def __call__(
         self,
@@ -89,13 +89,15 @@ class Model(nn.Module):
         for key, value in weights.items():
             if "self_attn.rotary_emb.inv_freq" in key:
                 continue
-            if key.startswith('model.layers.'):
-                layer_num = int(key.split('.')[2])
+            if key.startswith("model.layers."):
+                layer_num = int(key.split(".")[2])
                 if self.start_layer <= layer_num < self.end_layer:
                     shard_state_dict[key] = value
-            elif self.start_layer == 0 and key.startswith('model.embed_tokens'):
+            elif self.start_layer == 0 and key.startswith("model.embed_tokens"):
                 shard_state_dict[key] = value
-            elif self.end_layer == total_layers and (key.startswith('model.norm') or key.startswith('lm_head')):
+            elif self.end_layer == total_layers and (
+                key.startswith("model.norm") or key.startswith("lm_head")
+            ):
                 shard_state_dict[key] = value
 
         for l in range(self.args.num_hidden_layers):
@@ -107,23 +109,25 @@ class Model(nn.Module):
                             shard_state_dict.pop(f"{prefix}.mlp.experts.{e}.{m}.{k}")
                             for e in range(self.args.n_routed_experts)
                         ]
-                        shard_state_dict[f"{prefix}.mlp.switch_mlp.{
-                            m}.{k}"] = mx.stack(to_join)
+                        shard_state_dict[
+                            f"{prefix}.mlp.switch_mlp.{
+                            m}.{k}"
+                        ] = mx.stack(to_join)
                 total_layers = len(self.layers)
-        
+
         return shard_state_dict
 
-    @ property
+    @property
     def layers(self):
         return self.model.layers
 
-    @ property
+    @property
     def head_dim(self):
         return (
             self.args.qk_nope_head_dim + self.args.qk_rope_head_dim,
             self.args.v_head_dim,
         )
 
-    @ property
+    @property
     def n_kv_heads(self):
         return self.args.num_key_value_heads

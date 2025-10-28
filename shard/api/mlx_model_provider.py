@@ -103,7 +103,7 @@ class MLXModelProvider:
         stop_token_ids = set(self.tokenizer.eos_token_ids)
 
         log.info(f"🛑 Using tokenizer.eos_token_ids: {stop_token_ids}")
-        
+
         # Decode for debugging
         for token_id in stop_token_ids:
             try:
@@ -126,7 +126,9 @@ class MLXModelProvider:
         clients = self.connection_pool.create_clients_for_request()
 
         # 🔍 DEBUG: Log tokenizer EOS configuration before generation
-        log.info(f"🔍 Tokenizer EOS token IDs before generation: {self.tokenizer.eos_token_ids}")
+        log.info(
+            f"🔍 Tokenizer EOS token IDs before generation: {self.tokenizer.eos_token_ids}"
+        )
         for eos_id in self.tokenizer.eos_token_ids:
             try:
                 decoded = self.tokenizer.decode([eos_id])
@@ -151,11 +153,11 @@ class MLXModelProvider:
                     repetition_context_size=kwargs.get("repetition_context_size", 20),
                     max_tokens=kwargs.get("max_tokens", 256),
                 )
-                
+
                 # Yield all items from the generator
                 for item in generator:
                     yield item
-                    
+
             except GeneratorExit:
                 # Generator was closed early by consumer
                 log.debug("Generator closed early by consumer")
@@ -171,7 +173,7 @@ class MLXModelProvider:
                         generator.close()
                     except:
                         pass
-                
+
                 # Clean up clients after generator is fully exhausted
                 log.debug("Cleaning up Flight clients")
                 for i, client in enumerate(clients):

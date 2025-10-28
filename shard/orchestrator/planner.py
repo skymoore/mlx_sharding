@@ -153,43 +153,53 @@ class ShardingPlanner:
         logger.info(f"  Available peers: {len(self.peers)}")
         for peer in self.peers:
             logger.info(f"    - {peer.id[:8]}: {peer.ram_available_gb:.1f}GB RAM")
-    
+
     def _calculate_max_context_length(self, usable_memory: float) -> int:
         """
         Calculate the maximum context length that fits in available memory.
-        
+
         Args:
             usable_memory: Total usable memory in GB (after safety margin)
-            
+
         Returns:
             Maximum context length in tokens
         """
         weights_gb = self.memory_estimates["weights_gb"]
-        activation_overhead_gb = self.memory_estimates.get("activation_overhead_gb", 2.0)
-        
+        activation_overhead_gb = self.memory_estimates.get(
+            "activation_overhead_gb", 2.0
+        )
+
         # Memory available for KV cache
         memory_for_kv = usable_memory - weights_gb - activation_overhead_gb
-        
+
         if memory_for_kv <= 0:
             return 0
-        
+
         # Get model architecture parameters for KV cache calculation
         num_layers = self.memory_estimates.get("num_layers", 32)
-        num_key_value_heads = self.memory_estimates.get("num_key_value_heads", 
-                                                         self.memory_estimates.get("num_attention_heads", 32))
+        num_key_value_heads = self.memory_estimates.get(
+            "num_key_value_heads", self.memory_estimates.get("num_attention_heads", 32)
+        )
         head_dim = self.memory_estimates.get("head_dim", 128)
-        
+
         # KV cache formula: 2 * batch_size * num_layers * num_kv_heads * context_length * head_dim * 2 bytes
         # Solve for context_length: context_length = memory_for_kv_bytes / (2 * 1 * num_layers * num_kv_heads * head_dim * 2)
         batch_size = 1
         bytes_per_element = 2  # float16
-        
+
         kv_cache_bytes_available = memory_for_kv * (1024**3)
-        max_context = kv_cache_bytes_available / (2 * batch_size * num_layers * num_key_value_heads * head_dim * bytes_per_element)
-        
+        max_context = kv_cache_bytes_available / (
+            2
+            * batch_size
+            * num_layers
+            * num_key_value_heads
+            * head_dim
+            * bytes_per_element
+        )
+
         # Round down to nearest 1024 for cleaner numbers
         max_context = int(max_context // 1024) * 1024
-        
+
         return max(1024, max_context)  # Minimum 1024 tokens
 
     def calculate_sharding_plan(self) -> ShardingPlan:
@@ -237,7 +247,7 @@ class ShardingPlanner:
         if total_memory_needed > usable_memory:
             # Try to calculate maximum context length that fits
             max_context = self._calculate_max_context_length(usable_memory)
-            
+
             if max_context < 1024:
                 # Not enough memory even for minimal context
                 raise InsufficientMemoryError(
@@ -250,30 +260,36 @@ class ShardingPlanner:
                     f"  2. Use a smaller/quantized model\n"
                     f"  3. Reduce safety margin (risky)"
                 )
-            
+
             # Auto-reduce context length
             logger.warning("=" * 80)
             logger.warning(f"⚠️  NOT ENOUGH RAM FOR REQUESTED CONTEXT LENGTH")
-            logger.warning(f"   Requested: {self.context_length:,} tokens ({total_memory_needed:.1f}GB needed)")
+            logger.warning(
+                f"   Requested: {self.context_length:,} tokens ({total_memory_needed:.1f}GB needed)"
+            )
             logger.warning(f"   Available: {usable_memory:.1f}GB")
             logger.warning(f"   Reducing context length to: {max_context:,} tokens")
             logger.warning("=" * 80)
-            
+
             # Update context length and recalculate memory requirements
             self.context_length = max_context
-            
+
             # Re-estimate memory with new context length
             self.memory_estimates = SystemCapabilities.estimate_model_memory(
                 self.model_path_or_repo, self.context_length
             )
-            
+
             # Recalculate memory requirements
             kv_cache_key = f"kv_cache_{self.context_length//1024}k_gb"
             kv_cache_total_gb = self.memory_estimates.get(kv_cache_key, 2.0)
-            total_memory_needed = weights_gb + kv_cache_total_gb + activation_overhead_gb
-            
+            total_memory_needed = (
+                weights_gb + kv_cache_total_gb + activation_overhead_gb
+            )
+
             logger.info(f"Updated memory requirements:")
-            logger.info(f"  KV cache @ {self.context_length:,}: {kv_cache_total_gb:.1f}GB")
+            logger.info(
+                f"  KV cache @ {self.context_length:,}: {kv_cache_total_gb:.1f}GB"
+            )
             logger.info(f"  Total needed: {total_memory_needed:.1f}GB")
             logger.info(f"  Usable memory: {usable_memory:.1f}GB")
             logger.info(f"  Margin: {usable_memory - total_memory_needed:.1f}GB")
@@ -287,8 +303,9 @@ class ShardingPlanner:
 
         # Calculate how many layers each peer can handle
         import math
+
         peer_layer_capacity = []
-        
+
         logger.info("Per-peer layer capacity calculation:")
         for peer in self.peers:
             # Apply safety margin to each peer
@@ -306,29 +323,35 @@ class ShardingPlanner:
                 f"{available:.1f}GB usable → {available_for_layers:.1f}GB for layers → "
                 f"{max_layers} layers ({max_layers_float:.2f} exact)"
             )
-        
-        logger.info(f"  Total capacity: {sum(peer_layer_capacity)} layers (need {self.total_layers})")
+
+        logger.info(
+            f"  Total capacity: {sum(peer_layer_capacity)} layers (need {self.total_layers})"
+        )
 
         # Validate we can fit the model
         if sum(peer_layer_capacity) < self.total_layers:
             # If we're only 1-2 layers short, try reducing context slightly more
             layers_short = self.total_layers - sum(peer_layer_capacity)
             if layers_short <= 2 and self.context_length > 1024:
-                logger.warning(f"Short by {layers_short} layer(s), attempting further context reduction...")
+                logger.warning(
+                    f"Short by {layers_short} layer(s), attempting further context reduction..."
+                )
                 # Reduce context by 10% and retry
                 new_context = int(self.context_length * 0.9 // 1024) * 1024
                 new_context = max(1024, new_context)
-                
-                logger.warning(f"Reducing context from {self.context_length:,} to {new_context:,} tokens")
+
+                logger.warning(
+                    f"Reducing context from {self.context_length:,} to {new_context:,} tokens"
+                )
                 self.context_length = new_context
-                
+
                 # Re-estimate and recurse (but only once to avoid infinite loop)
                 self.memory_estimates = SystemCapabilities.estimate_model_memory(
                     self.model_path_or_repo, self.context_length
                 )
                 # Recalculate from the beginning
                 return self.calculate_sharding_plan()
-            
+
             raise InsufficientMemoryError(
                 f"Cannot fit {self.total_layers} layers across {len(self.peers)} peer(s). "
                 f"Total capacity: {sum(peer_layer_capacity)} layers. "

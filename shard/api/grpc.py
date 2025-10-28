@@ -19,7 +19,9 @@ class FlightConnectionPool:
             peer_addresses: List of (host, port) tuples for each peer
         """
         self.peer_addresses = peer_addresses
-        logger.info(f"✓ Flight connection pool initialized with {len(peer_addresses)} peers")
+        logger.info(
+            f"✓ Flight connection pool initialized with {len(peer_addresses)} peers"
+        )
 
     def create_clients_for_request(self) -> List[flight.FlightClient]:
         """

@@ -21,17 +21,17 @@ class LanguageModel(nn.Module):
         self.num_hidden_layers = config.num_hidden_layers
         self.start_layer = config.start_layer
         self.end_layer = config.end_layer
-        
+
         if self.start_layer == 0:
             self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        
+
         self.layers = []
         for i in range(self.num_hidden_layers):
             if self.start_layer <= i < self.end_layer:
                 self.layers.append(Qwen3MoeDecoderLayer(config, i))
             else:
                 self.layers.append(IdentityBlock())
-        
+
         if self.end_layer == self.num_hidden_layers:
             self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -52,6 +52,7 @@ class LanguageModel(nn.Module):
         T = h.shape[1]
         if T > 1:
             from mlx_lm.models.base import create_attention_mask
+
             mask = create_attention_mask(h, cache[0])
 
         for layer, c in zip(self.layers, cache):
@@ -70,12 +71,14 @@ class Model(nn.Module):
         self.start_layer = config.start_layer
         self.end_layer = config.end_layer
         self.model = LanguageModel(config)
-        
+
         if self.end_layer == self.args.num_hidden_layers:
             if config.tie_word_embeddings:
                 self.lm_head = None
             else:
-                self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+                self.lm_head = nn.Linear(
+                    config.hidden_size, config.vocab_size, bias=False
+                )
 
     def __call__(
         self,
@@ -94,15 +97,17 @@ class Model(nn.Module):
     def sanitize(self, weights):
         total_layers = self.args.num_hidden_layers
         shard_state_dict = {}
-        
+
         for key, value in weights.items():
-            if key.startswith('model.layers.'):
-                layer_num = int(key.split('.')[2])
+            if key.startswith("model.layers."):
+                layer_num = int(key.split(".")[2])
                 if self.start_layer <= layer_num < self.end_layer:
                     shard_state_dict[key] = value
-            elif self.start_layer == 0 and key.startswith('model.embed_tokens'):
+            elif self.start_layer == 0 and key.startswith("model.embed_tokens"):
                 shard_state_dict[key] = value
-            elif self.end_layer == total_layers and (key.startswith('model.norm') or key.startswith('lm_head')):
+            elif self.end_layer == total_layers and (
+                key.startswith("model.norm") or key.startswith("lm_head")
+            ):
                 shard_state_dict[key] = value
 
         # Stack experts for MoE layers
@@ -111,19 +116,28 @@ class Model(nn.Module):
                 prefix = f"model.layers.{l}"
                 # Check if this layer has MoE (not in mlp_only_layers)
                 if l not in self.args.mlp_only_layers:
-                    for n, m in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")]:
+                    for n, m in [
+                        ("w1", "gate_proj"),
+                        ("w2", "down_proj"),
+                        ("w3", "up_proj"),
+                    ]:
                         for k in ["weight", "scales", "biases"]:
                             if f"{prefix}.mlp.experts.0.{m}.{k}" in shard_state_dict:
                                 to_join = [
-                                    shard_state_dict.pop(f"{prefix}.mlp.experts.{e}.{m}.{k}")
+                                    shard_state_dict.pop(
+                                        f"{prefix}.mlp.experts.{e}.{m}.{k}"
+                                    )
                                     for e in range(self.args.num_experts)
                                 ]
-                                shard_state_dict[f"{prefix}.mlp.switch_mlp.{m}.{k}"] = mx.stack(to_join)
-        
+                                shard_state_dict[f"{prefix}.mlp.switch_mlp.{m}.{k}"] = (
+                                    mx.stack(to_join)
+                                )
+
         return shard_state_dict
 
     def make_cache(self):
         from mlx_lm.models.cache import KVCache
+
         return [KVCache() for _ in range(len(self.model.layers))]
 
     @property

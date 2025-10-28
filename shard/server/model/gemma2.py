@@ -6,10 +6,12 @@ import mlx.nn as nn
 from mlx_lm.models.gemma2 import ModelArgs, TransformerBlock, RMSNorm
 from .base import IdentityBlock
 
+
 @dataclass
 class ModelArgs(ModelArgs):
     start_layer: int = 0
     end_layer: int = 46
+
 
 class GemmaModel(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -43,7 +45,6 @@ class GemmaModel(nn.Module):
             h = h * (self.args.hidden_size**0.5)
         else:
             h = inputs
-        
 
         mask = None
         if h.shape[1] > 1:
@@ -59,6 +60,7 @@ class GemmaModel(nn.Module):
         if self.end_layer == self.num_hidden_layers:
             h = self.norm(h)
         return h
+
 
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -91,16 +93,21 @@ class Model(nn.Module):
         for key, value in weights.items():
             if "self_attn.rotary_emb.inv_freq" in key:
                 continue
-            if key.startswith('model.layers.'):
-                layer_num = int(key.split('.')[2])
+            if key.startswith("model.layers."):
+                layer_num = int(key.split(".")[2])
                 if self.start_layer <= layer_num < self.end_layer:
                     shard_state_dict[key] = value
-            elif (self.start_layer == 0 or self.end_layer == total_layers)  and key.startswith('model.embed_tokens'):
+            elif (
+                self.start_layer == 0 or self.end_layer == total_layers
+            ) and key.startswith("model.embed_tokens"):
                 shard_state_dict[key] = value
-            elif self.end_layer == total_layers and (key.startswith('model.norm') or key.startswith('lm_head')):
+            elif self.end_layer == total_layers and (
+                key.startswith("model.norm") or key.startswith("lm_head")
+            ):
                 shard_state_dict[key] = value
-        
+
         return shard_state_dict
+
     @property
     def layers(self):
         return self.model.layers

@@ -46,25 +46,25 @@ def _get_classes(config: dict):
 
 
 def load_model(
-    path_or_hf_repo: str, 
-    start_layer: int = None, 
+    path_or_hf_repo: str,
+    start_layer: int = None,
     end_layer: int = None,
     lazy: bool = False,
     strict: bool = True,
 ):
     """
     Load model with optional layer slicing for distributed inference.
-    
+
     This function extends mlx_lm's load_model with layer slicing capabilities
     for distributed inference across multiple peers.
-    
+
     Args:
         path_or_hf_repo: Local path or HuggingFace repo ID
         start_layer: Starting layer index (inclusive) for this shard
         end_layer: Ending layer index (exclusive) for this shard
         lazy: If False, eval model parameters immediately
         strict: Whether to raise exception if weights don't match
-        
+
     Returns:
         Tuple of (model, config) - model with loaded weights and configuration
     """
@@ -75,28 +75,30 @@ def load_model(
         path = Path(path_or_hf_repo)
     else:
         path = hf_repo_to_path(path_or_hf_repo)
-    
+
     # Load config
     with open(path / "config.json", "r") as f:
         config = json.load(f)
-        
+
     # Add layer slicing to config (our unique feature for distributed inference!)
     if start_layer is not None and end_layer is not None:
         config["start_layer"] = start_layer
         config["end_layer"] = end_layer
-        logger.info(f"Loading model shard: layers {start_layer}-{end_layer-1} (inclusive)")
-    
+        logger.info(
+            f"Loading model shard: layers {start_layer}-{end_layer-1} (inclusive)"
+        )
+
     # Load weights
     weight_files = glob.glob(str(path / "model*.safetensors"))
     if not weight_files:
         if strict:
             raise FileNotFoundError(f"No safetensors found in {path}")
         weight_files = []
-    
+
     weights = {}
     for wf in weight_files:
         weights.update(mx.load(wf))
-    
+
     # Get model classes
     model_class, model_args_class = _get_classes(config=config)
     model_args = model_args_class.from_dict(config)
@@ -108,6 +110,7 @@ def load_model(
 
     # Handle quantization
     if (quantization := config.get("quantization", None)) is not None:
+
         def class_predicate(p, m):
             # Handle custom per layer quantizations
             if p in config.get("quantization", {}):
@@ -123,16 +126,16 @@ def load_model(
             mode=quantization.get("mode", "affine"),
             class_predicate=class_predicate,
         )
-    
+
     # Load weights into model
     model.load_weights(list(weights.items()), strict=strict)
-    
+
     # Evaluate parameters if not lazy
     if not lazy:
         mx.eval(model.parameters())
-    
+
     model.eval()
-    
+
     return model, config
 
 
@@ -153,7 +156,7 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
     flat_np = np_tensor.flatten()
     full_bytes = flat_np.tobytes()
     checksum = hashlib.md5(full_bytes).hexdigest()
-    
+
     # Send metadata in first write (no data)
     # IMPORTANT: Send original_dtype so receiver can reconstruct bfloat16
     meta = {
@@ -161,20 +164,22 @@ def send_tensor(client: flight.FlightClient, tensor: mx.array, session_id: str =
         "total_chunks": total_chunks,
         "shape": list(tensor.shape),
         "dtype": original_dtype,  # Original MLX dtype (e.g., "mlx.core.bfloat16")
-        "md5": checksum
+        "md5": checksum,
     }
     schema = pa.schema([pa.field("chunk", pa.binary())])
     writer.begin(schema)
-    
+
     # Send metadata as first batch WITH chunk 0 data
     if total_chunks > 0:
         start = 0
         end = min(chunk_items * item_size, len(full_bytes))
         chunk0_bytes = full_bytes[start:end]
-        meta_batch = pa.RecordBatch.from_arrays([pa.array([chunk0_bytes])], schema=schema)
+        meta_batch = pa.RecordBatch.from_arrays(
+            [pa.array([chunk0_bytes])], schema=schema
+        )
     else:
         meta_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=schema)
-    
+
     writer.write_with_metadata(meta_batch, json.dumps(meta).encode())
 
     # Send remaining chunks (1 through total_chunks-1)
@@ -198,17 +203,19 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
             batch, meta = reader.read_chunk()
         except StopIteration as e:
             logger.error(f"StopIteration when reading first chunk: {e}")
-            raise ValueError("No data received from server - stream ended prematurely. The server may have crashed or encountered an error before sending a response.")
+            raise ValueError(
+                "No data received from server - stream ended prematurely. The server may have crashed or encountered an error before sending a response."
+            )
         except Exception as e:
             logger.error(f"Exception when reading first chunk: {type(e).__name__}: {e}")
             raise
-            
+
         if meta is None:
             raise ValueError("No metadata in response")
         meta_dict = json.loads(meta.to_pybytes())
 
         if not meta_dict.get("success"):
-            error_msg = meta_dict.get('message', 'Unknown error')
+            error_msg = meta_dict.get("message", "Unknown error")
             raise ValueError(f"Error from shard: {error_msg}")
 
         total_chunks = meta_dict["total_chunks"]
@@ -229,14 +236,16 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
         chunks = {}
         if batch and batch.num_rows > 0:
             chunks[0] = batch[0][0].as_py()
-        
+
         # Read remaining chunks (1 through N-1)
         for i in range(1, total_chunks):
             try:
                 batch, chunk_meta = reader.read_chunk()
             except StopIteration:
-                raise ValueError(f"Stream ended prematurely at chunk {i}/{total_chunks}")
-                
+                raise ValueError(
+                    f"Stream ended prematurely at chunk {i}/{total_chunks}"
+                )
+
             if chunk_meta is None:
                 raise ValueError(f"Missing chunk metadata for chunk {i}")
             chunk_dict = json.loads(chunk_meta.to_pybytes())
@@ -244,28 +253,36 @@ def response_to_mlx_array(reader: flight.FlightStreamReader):
             chunks[chunk_idx] = batch[0][0].as_py()
 
         # Reassemble in order
-        full_bytes = b''.join(chunks[i] for i in range(total_chunks))
-        
+        full_bytes = b"".join(chunks[i] for i in range(total_chunks))
+
         # Verify checksum if provided
         if "md5" in meta_dict and meta_dict["md5"]:
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             expected_md5 = meta_dict["md5"]
             if received_md5 != expected_md5:
-                raise ValueError(f"Response checksum mismatch: expected={expected_md5}, received={received_md5}")
-        
+                raise ValueError(
+                    f"Response checksum mismatch: expected={expected_md5}, received={received_md5}"
+                )
+
         # Check if size matches
         expected_size = np.prod(shape) * np.dtype(np_dtype).itemsize
         actual_size = len(full_bytes)
-        
+
         if expected_size != actual_size:
-            logger.error(f"Size mismatch! Expected {expected_size} bytes for shape {shape} with dtype {np_dtype}, "
-                        f"but received {actual_size} bytes")
+            logger.error(
+                f"Size mismatch! Expected {expected_size} bytes for shape {shape} with dtype {np_dtype}, "
+                f"but received {actual_size} bytes"
+            )
             # Try to infer what went wrong
             if actual_size == expected_size * 2:
-                logger.error("Received 2x expected bytes - possible dtype mismatch (sent float32, expected float16?)")
+                logger.error(
+                    "Received 2x expected bytes - possible dtype mismatch (sent float32, expected float16?)"
+                )
             elif actual_size == expected_size // 2:
-                logger.error("Received 0.5x expected bytes - possible dtype mismatch (sent float16, expected float32?)")
-        
+                logger.error(
+                    "Received 0.5x expected bytes - possible dtype mismatch (sent float16, expected float32?)"
+                )
+
         np_array = np.frombuffer(full_bytes, dtype=np_dtype).reshape(shape)
         arrow_tensor = pa.Tensor.from_numpy(np_array)
         # Pass original dtype to reconstruct bfloat16 correctly
@@ -285,23 +302,29 @@ def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, back
         try:
             writer, reader = send_tensor(client, tensor, session_id)
             result = response_to_mlx_array(reader)
-            
+
             # Send ACK to server to prevent premature stream closure
             try:
                 ack_schema = pa.schema([pa.field("ack", pa.binary())])
-                ack_batch = pa.RecordBatch.from_arrays([pa.array([b"ACK"])], schema=ack_schema)
+                ack_batch = pa.RecordBatch.from_arrays(
+                    [pa.array([b"ACK"])], schema=ack_schema
+                )
                 writer.write_metadata(b"ACK")
                 logger.debug(f"[{session_id or 'default'}] Sent ACK to server")
             except Exception as ack_error:
-                logger.debug(f"[{session_id or 'default'}] Could not send ACK: {ack_error}")
-            
+                logger.debug(
+                    f"[{session_id or 'default'}] Could not send ACK: {ack_error}"
+                )
+
             return result
 
         except flight.FlightInternalError as e:
             error_str = str(e)
             if "Checksum mismatch" in error_str:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Checksum mismatch, retrying ({attempt+1}/{max_retries})")
+                    logger.warning(
+                        f"Checksum mismatch, retrying ({attempt+1}/{max_retries})"
+                    )
                     time.sleep(backoff)
                     continue
                 else:
@@ -311,9 +334,14 @@ def send_and_receive_tensor(client, tensor, session_id=None, max_retries=3, back
         except ValueError as e:
             error_str = str(e)
             # Retry on premature stream end errors
-            if "stream ended prematurely" in error_str.lower() or "no data received" in error_str.lower():
+            if (
+                "stream ended prematurely" in error_str.lower()
+                or "no data received" in error_str.lower()
+            ):
                 if attempt < max_retries - 1:
-                    logger.warning(f"Stream ended prematurely, retrying ({attempt+1}/{max_retries}): {e}")
+                    logger.warning(
+                        f"Stream ended prematurely, retrying ({attempt+1}/{max_retries}): {e}"
+                    )
                     time.sleep(backoff * (attempt + 1))  # Exponential backoff
                     continue
                 else:
@@ -373,7 +401,9 @@ def create_generate_step_with_flight(flight_clients: List[flight.FlightClient]):
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
 
         for client in flight_clients:
-            client.do_action(flight.Action("ResetCache", json.dumps({"session_id": ""}).encode()))
+            client.do_action(
+                flight.Action("ResetCache", json.dumps({"session_id": ""}).encode())
+            )
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
@@ -412,7 +442,7 @@ def create_generate_step_with_flight(flight_clients: List[flight.FlightClient]):
             elif y.ndim == 1:
                 y = y.reshape(1, -1)
 
-            output = model(y, cache=cache) 
+            output = model(y, cache=cache)
 
             for client in flight_clients:
                 output = send_and_receive_tensor(client, output)
@@ -445,6 +475,7 @@ class PipelineModel(nn.Module):
     """
     Wrapper that makes a distributed Flight pipeline look like a local model.
     """
+
     def __init__(self, flight_clients: List[flight.FlightClient], session_id: str):
         super().__init__()
         self.flight_clients = flight_clients
@@ -453,13 +484,13 @@ class PipelineModel(nn.Module):
 
     def make_cache(self):
         return []
-        
+
     def __call__(self, inputs: mx.array, cache=None) -> mx.array:
         if inputs.dtype != mx.int32:
             inputs = inputs.astype(mx.int32)
         if inputs.ndim == 1:
             inputs = inputs.reshape(1, -1)
-        
+
         step = 2048
         if inputs.dtype == mx.int32 and inputs.shape[1] > step:
             processed = None
@@ -476,13 +507,15 @@ class PipelineModel(nn.Module):
             tensor = inputs
             for i, client in enumerate(self.flight_clients):
                 tensor = send_and_receive_tensor(client, tensor, self.session_id)
-        
+
         return tensor
 
 
-def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], tokenizer):
+def create_coordinator_generate_step(
+    flight_clients: List[flight.FlightClient], tokenizer
+):
     from mlx_lm.generate import stream_generate
-    
+
     def generate_step(
         prompt: mx.array,
         temp: float = 0.0,
@@ -493,19 +526,21 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
         logit_bias: Optional[Dict[int, float]] = None,
         max_tokens: int = 256,
     ) -> Generator[Tuple[mx.array, mx.array], None, None]:
-        
+
         logger.info("=" * 80)
         logger.info("🚀 DISTRIBUTED GENERATION START")
         logger.info("=" * 80)
         logger.info(f"Prompt shape: {prompt.shape}")
-        logger.info(f"Prompt tokens: {prompt.tolist() if prompt.size < 100 else f'{prompt.tolist()[:20]}...'}")
+        logger.info(
+            f"Prompt tokens: {prompt.tolist() if prompt.size < 100 else f'{prompt.tolist()[:20]}...'}"
+        )
         logger.info(f"Max tokens: {max_tokens}")
         logger.info(f"Temperature: {temp}")
         logger.info(f"Top-p: {top_p}")
         logger.info(f"Top-k: {top_k}")
         logger.info(f"Repetition penalty: {repetition_penalty}")
-        
-        if hasattr(tokenizer, 'eos_token_ids'):
+
+        if hasattr(tokenizer, "eos_token_ids"):
             logger.info(f"Tokenizer EOS token IDs: {tokenizer.eos_token_ids}")
             for eos_id in tokenizer.eos_token_ids:
                 try:
@@ -514,30 +549,35 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
                 except:
                     pass
         logger.info("=" * 80)
-        
+
         session_id = str(uuid.uuid4())
         logger.info(f"Session ID: {session_id}")
-        
+
         for client in flight_clients:
-            client.do_action(flight.Action("ResetCache", json.dumps({"session_id": session_id}).encode()))
-        
+            client.do_action(
+                flight.Action(
+                    "ResetCache", json.dumps({"session_id": session_id}).encode()
+                )
+            )
+
         pipeline_model = PipelineModel(flight_clients, session_id)
-        
+
         logits_processors = make_logits_processors(
             logit_bias=logit_bias,
             repetition_penalty=repetition_penalty,
             repetition_context_size=repetition_context_size,
         )
-        
+
         if temp == 0:
             sampler = lambda x: mx.argmax(x, axis=-1)
         else:
             from mlx_lm.sample_utils import make_sampler
+
             sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k)
-        
+
         token_count = 0
         start_time = time.time()
-        
+
         for response in stream_generate(
             model=pipeline_model,
             tokenizer=tokenizer,
@@ -551,7 +591,7 @@ def create_coordinator_generate_step(flight_clients: List[flight.FlightClient], 
 
         generation_time = time.time() - start_time
         tokens_per_second = token_count / generation_time if generation_time > 0 else 0
-        
+
         logger.info("=" * 80)
         logger.info(f"🏁 GENERATION COMPLETE")
         logger.info(f"   Total tokens: {token_count}")
@@ -566,18 +606,18 @@ def mlx_to_arrow(tensor: mx.array) -> Tuple[pa.Tensor, str]:
     """
     Convert MLX array to PyArrow Tensor via NumPy interop.
     Preserves dtype and shape for bit-exact serialization.
-    
+
     Returns:
         Tuple of (arrow_tensor, original_dtype_str) where original_dtype_str
         is needed to reconstruct bfloat16 (which is stored as uint16)
     """
     original_dtype = str(tensor.dtype)
-    
+
     # Handle bfloat16 by viewing as uint16 (preserves exact bits, no precision loss)
     # NumPy/Arrow don't support bfloat16, but we can store the raw 16-bit values
     if tensor.dtype == mx.bfloat16:
         tensor = tensor.view(mx.uint16)
-    
+
     np_array = np.array(tensor, copy=False)  # Zero-copy view when possible
     return pa.Tensor.from_numpy(np_array), original_dtype
 
@@ -586,7 +626,7 @@ def arrow_to_mlx(arrow_tensor: pa.Tensor, original_dtype: str = None) -> mx.arra
     """
     Convert PyArrow Tensor back to MLX array.
     Preserves original dtype through NumPy.
-    
+
     Args:
         arrow_tensor: PyArrow tensor to convert
         original_dtype: Original MLX dtype string (e.g., "mlx.core.bfloat16")
@@ -594,10 +634,9 @@ def arrow_to_mlx(arrow_tensor: pa.Tensor, original_dtype: str = None) -> mx.arra
     """
     np_array = arrow_tensor.to_numpy()
     mlx_array = mx.array(np_array)
-    
+
     # If original dtype was bfloat16, view the uint16 data back as bfloat16
     if original_dtype == "mlx.core.bfloat16":
         mlx_array = mlx_array.view(mx.bfloat16)
 
     return mlx_array
-

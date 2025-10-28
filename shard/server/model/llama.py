@@ -69,8 +69,7 @@ class Model(nn.Module):
         self.model = LlamaModel(args)
         if self.end_layer == self.args.num_hidden_layers:
             if not args.tie_word_embeddings:
-                self.lm_head = nn.Linear(
-                    args.hidden_size, args.vocab_size, bias=False)
+                self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
     def __call__(
         self,
@@ -91,15 +90,17 @@ class Model(nn.Module):
         for key, value in weights.items():
             if "self_attn.rotary_emb.inv_freq" in key:
                 continue
-            if key.startswith('model.layers.'):
-                layer_num = int(key.split('.')[2])
+            if key.startswith("model.layers."):
+                layer_num = int(key.split(".")[2])
                 if self.start_layer <= layer_num < self.end_layer:
                     shard_state_dict[key] = value
-            elif self.start_layer == 0 and key.startswith('model.embed_tokens'):
+            elif self.start_layer == 0 and key.startswith("model.embed_tokens"):
                 shard_state_dict[key] = value
-            elif self.end_layer == total_layers and (key.startswith('model.norm') or key.startswith('lm_head')):
+            elif self.end_layer == total_layers and (
+                key.startswith("model.norm") or key.startswith("lm_head")
+            ):
                 shard_state_dict[key] = value
-        
+
         return shard_state_dict
 
     @property

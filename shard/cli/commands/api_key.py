@@ -1,4 +1,5 @@
 """API key generation command."""
+
 import click
 import secrets
 

@@ -64,7 +64,7 @@ class MLXFlightServer(flight.FlightServerBase):
         session_id = "unknown"
         resp_schema = pa.schema([pa.field("chunk", pa.binary())])
         writer_begun = False
-        
+
         try:
             command = descriptor.command.decode()
             if command != "SendTensor":
@@ -108,10 +108,12 @@ class MLXFlightServer(flight.FlightServerBase):
             full_bytes = b"".join(chunks.get(i, b"") for i in range(total_chunks))
             received_md5 = hashlib.md5(full_bytes).hexdigest()
             expected_md5 = meta_dict["md5"]
-            
+
             if received_md5 != expected_md5:
-                logger.error(f"[{session_id}] Checksum mismatch: "
-                           f"expected={expected_md5}, received={received_md5}")
+                logger.error(
+                    f"[{session_id}] Checksum mismatch: "
+                    f"expected={expected_md5}, received={received_md5}"
+                )
                 raise flight.FlightInternalError("Checksum mismatch")
             if len(full_bytes) == 0:
                 raise flight.FlightInvalidArgument("No data received")
@@ -135,7 +137,10 @@ class MLXFlightServer(flight.FlightServerBase):
             try:
                 processed_tensor = self.model(tensor, cache=cache_to_use)
             except Exception as model_error:
-                logger.error(f"[{session_id}] Model processing failed: {model_error}", exc_info=True)
+                logger.error(
+                    f"[{session_id}] Model processing failed: {model_error}",
+                    exc_info=True,
+                )
                 raise
 
             # Update request count and clear cache if needed
@@ -153,18 +158,21 @@ class MLXFlightServer(flight.FlightServerBase):
             chunk_items = CHUNK_SIZE_BYTES // item_size
             total_items = np_processed.size
             total_chunks_resp = (total_items + chunk_items - 1) // chunk_items
-            
+
             # Begin writer now that we're ready to send response
             try:
                 writer.begin(resp_schema)
                 writer_begun = True
             except Exception as begin_error:
-                logger.error(f"[{session_id}] Failed to begin writer: {begin_error}", exc_info=True)
+                logger.error(
+                    f"[{session_id}] Failed to begin writer: {begin_error}",
+                    exc_info=True,
+                )
                 raise
 
             # Prepare chunks
             flat_np = np_processed.flatten()
-            
+
             # Send metadata with chunk 0 data
             # Use original_dtype from mlx_to_arrow which preserves bfloat16 info
             resp_meta = {
@@ -175,7 +183,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 "total_chunks": total_chunks_resp,
                 "md5": hashlib.md5(flat_np.tobytes()).hexdigest(),
             }
-            
+
             # First chunk (chunk 0) sent with metadata
             if total_chunks_resp > 0:
                 start = 0
@@ -183,15 +191,24 @@ class MLXFlightServer(flight.FlightServerBase):
                 chunk_np = flat_np[start:end]
                 chunk_bytes = chunk_np.tobytes()
                 chunk_array = pa.array([chunk_bytes])
-                meta_batch = pa.RecordBatch.from_arrays([chunk_array], schema=resp_schema)
+                meta_batch = pa.RecordBatch.from_arrays(
+                    [chunk_array], schema=resp_schema
+                )
                 try:
-                    writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
+                    writer.write_with_metadata(
+                        meta_batch, json.dumps(resp_meta).encode()
+                    )
                 except Exception as write_error:
-                    logger.error(f"[{session_id}] Failed to write metadata and chunk 0: {write_error}", exc_info=True)
+                    logger.error(
+                        f"[{session_id}] Failed to write metadata and chunk 0: {write_error}",
+                        exc_info=True,
+                    )
                     raise
             else:
                 # Edge case: empty tensor
-                meta_batch = pa.RecordBatch.from_arrays([pa.array([b""], type=pa.binary())], schema=resp_schema)
+                meta_batch = pa.RecordBatch.from_arrays(
+                    [pa.array([b""], type=pa.binary())], schema=resp_schema
+                )
                 writer.write_with_metadata(meta_batch, json.dumps(resp_meta).encode())
 
             # Send remaining chunks (1 through N-1)
@@ -205,7 +222,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 writer.write_with_metadata(
                     batch, json.dumps({"chunk_index": i}).encode()
                 )
-            
+
             # CRITICAL FIX for race condition:
             # In bidirectional streaming, if the server returns immediately after writing,
             # the stream can close before the client has time to read the data, causing
@@ -231,7 +248,7 @@ class MLXFlightServer(flight.FlightServerBase):
                 # But we can still try to write an error batch
                 if not writer_begun:
                     writer.begin(resp_schema)
-                
+
                 error_meta = {
                     "success": False,
                     "message": str(e),
@@ -240,11 +257,16 @@ class MLXFlightServer(flight.FlightServerBase):
                     "total_chunks": 1,
                     "md5": "",
                 }
-                error_batch = pa.RecordBatch.from_arrays([pa.array([b""])], schema=resp_schema)
+                error_batch = pa.RecordBatch.from_arrays(
+                    [pa.array([b""])], schema=resp_schema
+                )
                 writer.write_with_metadata(error_batch, json.dumps(error_meta).encode())
                 # Stream closes automatically when do_exchange returns
             except Exception as write_error:
-                logger.error(f"[{session_id}] Failed to send error response: {write_error}", exc_info=True)
+                logger.error(
+                    f"[{session_id}] Failed to send error response: {write_error}",
+                    exc_info=True,
+                )
                 # If we can't send error through stream, raise it to propagate to client
                 raise flight.FlightInternalError(str(e)) from write_error
 
@@ -302,4 +324,3 @@ def serve(
             f"Model loaded with layers {actual_start} to {actual_end} (inclusive)"
         )
     server.serve()  # Blocks until shutdown
-

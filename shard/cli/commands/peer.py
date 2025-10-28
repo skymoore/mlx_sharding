@@ -1,4 +1,5 @@
 """Peer server command."""
+
 import click
 import logging
 import signal

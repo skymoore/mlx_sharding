@@ -209,11 +209,7 @@ async def completions(
     model_provider = http_request.app.state.model_provider
 
     try:
-        prompt = model_provider.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-        )
+        prompt = model_provider.tokenizer.encode(request.prompt)
         prompt_array = mx.array(prompt)
 
         if request.stream:
