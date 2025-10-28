@@ -10,8 +10,6 @@ This is a lightweight worker node that:
 
 import logging
 import threading
-import signal
-import sys
 from pathlib import Path
 from typing import Optional, Dict
 from dataclasses import dataclass
@@ -24,6 +22,8 @@ from shard.zeroconf.capabilities import SystemCapabilities
 from shard.server.server import serve as flight_serve  # Updated to Flight
 from shard.server.utils import load_model
 from mlx_lm.tokenizer_utils import load_tokenizer
+import gc
+import mlx.core as mx
 
 # Setup logging
 logging.basicConfig(
@@ -158,6 +158,11 @@ class PeerServer:
                 self.assignment = None
                 self.state = "idle"
                 self.discovery.update_status("idle", model_loaded="", layers_loaded="")
+
+                # Force garbage collection and clear MLX cache
+                gc.collect()
+                mx.clear_cache()
+                logger.info("✓ Memory freed (garbage collected and MLX cache cleared)")
 
             logger.info(
                 f"Unclaimed from coordinator {old_coordinator[:8] if old_coordinator else 'none'}"
@@ -427,7 +432,14 @@ class PeerServer:
 
             self.discovery.update_status("idle", model_loaded="", layers_loaded="")
 
-            logger.info("Model unloaded")
+            # Force garbage collection and clear MLX cache
+            import gc
+            import mlx.core as mx
+
+            gc.collect()
+            mx.clear_cache()
+            logger.info("✓ Model unloaded and memory freed")
+
             return {"success": True, "message": "Model unloaded"}
 
     def start_flight_server(self, model_path: str, start_layer: int, end_layer: int):

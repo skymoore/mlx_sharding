@@ -1,6 +1,6 @@
 from shard.api.models import ChatCompletionRequest, CompletionRequest
 import mlx.core as mx
-from typing import Any, Dict
+from typing import Any, Dict, List, Union, Optional
 import time
 import uuid
 import json
@@ -9,6 +9,23 @@ from logging import getLogger
 from shard.api.mlx_model_provider import MLXModelProvider
 
 log = getLogger(__name__)
+
+
+def normalize_stop_sequences(stop: Optional[Union[str, List[str]]]) -> List[str]:
+    """Normalize stop sequences to a list of strings."""
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop]
+    return stop
+
+
+def check_stop_sequence(text: str, stop_sequences: List[str]) -> Optional[str]:
+    """Check if text contains any stop sequence. Returns the matched sequence or None."""
+    for stop_seq in stop_sequences:
+        if stop_seq in text:
+            return stop_seq
+    return None
 
 
 async def generate_chat_completion(
@@ -21,6 +38,7 @@ async def generate_chat_completion(
 
     finish_reason = "length"
     start_time = time.time()
+    stop_sequences = normalize_stop_sequences(request.stop)
 
     for (token, _), n in zip(
         model_provider.generate(
@@ -41,6 +59,15 @@ async def generate_chat_completion(
             finish_reason = "stop"
             break
 
+        # Check for stop sequences
+        if stop_sequences:
+            current_text = detokenizer.text
+            matched_stop = check_stop_sequence(current_text, stop_sequences)
+            if matched_stop:
+                finish_reason = "stop"
+                log.info(f"Stop sequence detected: {repr(matched_stop)}")
+                break
+
         if n % 256 == 0:
             mx.clear_cache()
 
@@ -58,6 +85,13 @@ async def generate_chat_completion(
 
     detokenizer.finalize()
     text = detokenizer.text
+
+    # Trim stop sequence from output if present
+    if stop_sequences:
+        for stop_seq in stop_sequences:
+            if stop_seq in text:
+                text = text.split(stop_seq)[0]
+                break
 
     # Build response
     response = {
@@ -97,6 +131,7 @@ async def stream_chat_completion(
     finish_reason = "length"
     token_count = 0
     start_time = time.time()
+    stop_sequences = normalize_stop_sequences(request.stop)
 
     try:
         for (token, _), n in zip(
@@ -117,6 +152,15 @@ async def stream_chat_completion(
             if token == model_provider.tokenizer.eos_token_id:
                 finish_reason = "stop"
                 break
+
+            # Check for stop sequences
+            if stop_sequences:
+                current_text = detokenizer.text
+                matched_stop = check_stop_sequence(current_text, stop_sequences)
+                if matched_stop:
+                    finish_reason = "stop"
+                    log.info(f"Stop sequence detected: {repr(matched_stop)}")
+                    break
 
             # Get the segment to send
             text = detokenizer.last_segment
@@ -197,6 +241,8 @@ async def generate_completion(
     detokenizer = model_provider.tokenizer.detokenizer
     detokenizer.reset()
     start_time = time.time()
+    finish_reason = "length"
+    stop_sequences = normalize_stop_sequences(request.stop)
 
     for (token, _), _ in zip(
         model_provider.generate(
@@ -213,7 +259,17 @@ async def generate_completion(
         detokenizer.add_token(token)
 
         if token == model_provider.tokenizer.eos_token_id:
+            finish_reason = "stop"
             break
+
+        # Check for stop sequences
+        if stop_sequences:
+            current_text = detokenizer.text
+            matched_stop = check_stop_sequence(current_text, stop_sequences)
+            if matched_stop:
+                finish_reason = "stop"
+                log.info(f"Stop sequence detected: {repr(matched_stop)}")
+                break
 
     generation_time = time.time() - start_time
     tokens_per_second = len(tokens) / generation_time if generation_time > 0 else 0
@@ -230,6 +286,13 @@ async def generate_completion(
     detokenizer.finalize()
     text = detokenizer.text
 
+    # Trim stop sequence from output if present
+    if stop_sequences:
+        for stop_seq in stop_sequences:
+            if stop_seq in text:
+                text = text.split(stop_seq)[0]
+                break
+
     return {
         "id": f"cmpl-{uuid.uuid4()}",
         "object": "text_completion",
@@ -239,7 +302,7 @@ async def generate_completion(
             {
                 "index": 0,
                 "text": text,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {
@@ -260,6 +323,8 @@ async def stream_completion(
     detokenizer.reset()
     token_count = 0
     start_time = time.time()
+    finish_reason = "length"
+    stop_sequences = normalize_stop_sequences(request.stop)
 
     try:
         for (token, _), _ in zip(
@@ -275,6 +340,20 @@ async def stream_completion(
         ):
             token_count += 1
             detokenizer.add_token(token)
+
+            if token == model_provider.tokenizer.eos_token_id:
+                finish_reason = "stop"
+                break
+
+            # Check for stop sequences
+            if stop_sequences:
+                current_text = detokenizer.text
+                matched_stop = check_stop_sequence(current_text, stop_sequences)
+                if matched_stop:
+                    finish_reason = "stop"
+                    log.info(f"Stop sequence detected: {repr(matched_stop)}")
+                    break
+
             text = detokenizer.last_segment
 
             if text:
@@ -295,9 +374,6 @@ async def stream_completion(
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0.001)
 
-            if token == model_provider.tokenizer.eos_token_id:
-                break
-
         # Log generation statistics
         generation_time = time.time() - start_time
         tokens_per_second = token_count / generation_time if generation_time > 0 else 0
@@ -311,6 +387,21 @@ async def stream_completion(
         log.info(f"   Tokens/second: {tokens_per_second:.2f}")
         log.info("=" * 80)
 
+        # Send final chunk with finish_reason
+        final_chunk = {
+            "id": request_id,
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "",
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
     except GeneratorExit:
